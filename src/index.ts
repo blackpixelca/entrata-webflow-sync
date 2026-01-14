@@ -8,6 +8,7 @@ export interface Env {
   // Secrets (set via: wrangler secret put SECRET_NAME)
   ENTRATA_API_KEY: string;
   ENTRATA_BASE_URL: string;
+    ENTRATA_ORG: string;
   WEBFLOW_API_TOKEN: string;
   
   // JSON array of property configurations
@@ -128,7 +129,7 @@ async function fetchEntrataUnits(
   propertyId: string
 ): Promise<EntrataUnit[]> {
     // Correct Entrata API endpoint - JSON-RPC format
-  const endpoint = `${env.ENTRATA_BASE_URL}/v1/propertyunits`;
+    const endpoint = `${env.ENTRATA_BASE_URL}/${env.ENTRATA_ORG}/v1/propertyunits`;
   
   const response = await fetch(endpoint, {
     method: 'POST',  // Changed from GET to POST
