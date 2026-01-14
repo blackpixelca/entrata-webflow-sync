@@ -10,10 +10,6 @@
     "crons": ["0 7 * * *"]
   },
 
-  // Property configurations (add more as needed)
-  "vars": {
-    "PROPERTIES": "[{\"entrataPropertyId\":\"PROPERTY_1_ID\",\"webflowSiteId\":\"SITE_1_ID\",\"webflowCollectionId\":\"COLLECTION_1_ID\"}]"
-  }
 
   // Secrets (set via: wrangler secret put SECRET_NAME)
   // - ENTRATA_API_KEY
