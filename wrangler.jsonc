@@ -1,0 +1,22 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "entrata-webflow-sync",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-01-15",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Cron triggers - Daily at 2 AM EST (7 AM UTC)
+  "triggers": {
+    "crons": ["0 7 * * *"]
+  },
+
+  // Property configurations (add more as needed)
+  "vars": {
+    "PROPERTIES": "[{\"entrataPropertyId\":\"PROPERTY_1_ID\",\"webflowSiteId\":\"SITE_1_ID\",\"webflowCollectionId\":\"COLLECTION_1_ID\"}]"
+  }
+
+  // Secrets (set via: wrangler secret put SECRET_NAME)
+  // - ENTRATA_API_KEY
+  // - ENTRATA_BASE_URL
+  // - WEBFLOW_API_TOKEN
+}
