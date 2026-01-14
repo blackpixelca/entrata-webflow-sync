@@ -161,6 +161,7 @@ async function fetchEntrataUnits(
   
   // Extract units from JSON-RPC response
   return data.response?.result?.PhysicalProperty?.Property?.PropertyUnit || [];
+  }
 
 /**
  * Transform Entrata units to Webflow CMS items
