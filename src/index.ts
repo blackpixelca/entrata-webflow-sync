@@ -249,4 +249,3 @@ async function syncToWebflow(
   }
 }
 
-}
