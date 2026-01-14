@@ -1,0 +1,19 @@
+{
+  "name": "entrata-webflow-sync",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker to sync Entrata property data to Webflow CMS",
+  "main": "src/index.ts",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "tail": "wrangler tail"
+  },
+  "keywords": ["cloudflare", "worker", "entrata", "webflow", "sync"],
+  "author": "Black Pixel",
+  "license": "MIT",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.3.3",
+    "wrangler": "^3.107.0"
+  }
+}
