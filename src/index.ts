@@ -127,28 +127,40 @@ async function fetchEntrataUnits(
   env: Env,
   propertyId: string
 ): Promise<EntrataUnit[]> {
-  // TODO: Adjust endpoint based on your Entrata API structure
-  const endpoint = `${env.ENTRATA_BASE_URL}/properties/${propertyId}/units`;
-
+    // Correct Entrata API endpoint - JSON-RPC format
+  const endpoint = `${env.ENTRATA_BASE_URL}/v1/propertyunits`;
+  
   const response = await fetch(endpoint, {
-    method: 'GET',
+    method: 'POST',  // Changed from GET to POST
     headers: {
-      'Authorization': `Basic ${env.ENTRATA_API_KEY}`,
+      'X-Api-Key': env.ENTRATA_API_KEY,  // Changed from Authorization: Basic
       'Content-Type': 'application/json',
     },
+    body: JSON.stringify({  // Added JSON-RPC request body
+      auth: {
+        type: 'apikey'
+      },
+      requestId: '1',
+      method: {
+        name: 'getPropertyUnits',
+        params: {
+          propertyIds: [propertyId]
+        }
+      }
+    })
   });
 
   if (!response.ok) {
+    const errorText = await response.text();
     throw new Error(
-      `Entrata API failed: ${response.status} ${response.statusText}`
+      `Entrata API failed: ${response.status} ${response.statusText} - ${errorText}`
     );
   }
 
   const data = await response.json();
   
-  // TODO: Adjust based on your Entrata API response structure
-  return data.units || data.response?.result?.units || [];
-}
+  // Extract units from JSON-RPC response
+  return data.response?.result?.PhysicalProperty?.Property?.PropertyUnit || [];
 
 /**
  * Transform Entrata units to Webflow CMS items
