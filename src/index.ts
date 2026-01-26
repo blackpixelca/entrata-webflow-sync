@@ -144,9 +144,10 @@ async function fetchEntrataUnits(
       requestId: '1',
       method: {
         name: 'getPropertyUnits',
-        params: {
-          propertyIds: [propertyId]
-        }
+params: {
+  propertyIds: propertyId
+}
+
       }
     })
   });
