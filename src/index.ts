@@ -122,32 +122,32 @@ async function syncSingleProperty(
 }
 
 /**
- * Fetch units from Entrata API
+ * Fetch floorplans from Entrata API
  */
-async function fetchEntrataUnits(
+async function fetchEntrataFloorplans(
   env: Env,
   propertyId: string
-): Promise<EntrataUnit[]> {
-    // Correct Entrata API endpoint - JSON-RPC format
-    const endpoint = `${env.ENTRATA_BASE_URL}/${env.ENTRATA_ORG}/v1/propertyunits`;
+): Promise<EntrataFloorplan[]> {
+  const endpoint = `${env.ENTRATA_BASE_URL}/${env.ENTRATA_ORG}/v1/floorplans`; // Update endpoint
   
   const response = await fetch(endpoint, {
-    method: 'POST',  // Changed from GET to POST
+    method: 'POST',
     headers: {
-      'X-Api-Key': env.ENTRATA_API_KEY,  // Changed from Authorization: Basic
+      'X-Api-Key': env.ENTRATA_API_KEY,
       'Content-Type': 'application/json',
     },
-    body: JSON.stringify({  // Added JSON-RPC request body
+    body: JSON.stringify({
       auth: {
         type: 'apikey'
       },
       requestId: '1',
       method: {
-        name: 'getPropertyUnits',
-params: {
-  propertyIds: propertyId
-}
-
+        name: 'getFloorPlans', // Update method name
+        params: {
+          propertyIds: propertyId,
+          includeAvailability: true, // Get availability counts
+          includePricing: true // Get pricing info
+        }
       }
     })
   });
@@ -161,9 +161,9 @@ params: {
 
   const data = await response.json();
   
-  // Extract units from JSON-RPC response
-  return data.response?.result?.PhysicalProperty?.Property?.PropertyUnit || [];
-  }
+  // Extract floorplans from response (adjust path based on actual API response)
+  return data.response?.result?.FloorPlans || [];
+}
 
 /**
  * Transform Entrata units to Webflow CMS items
