@@ -319,7 +319,7 @@ function transformToWebflowItems(
     return {
       fieldData: {
         // Basic info - matches Webflow collection
-        'unit-name': name,
+        'name': name,  // Changed from 'unit-name' to 'name'
         'slug': slug,
         
         // Custom fields - matches Webflow collection
