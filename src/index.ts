@@ -178,6 +178,7 @@ async function fetchEntrataUnitTypes(
   
   // Try common paths
   const possiblePaths = [
+    data.response?.result?.unitTypes?.unitType,  // Correct path for this API
     data.response?.result?.UnitTypes,
     data.response?.result?.unitTypes,
     data.response?.result?.PropertyUnitTypes,
@@ -267,21 +268,39 @@ function transformToWebflowItems(
   config: PropertyConfig
 ): WebflowItem[] {
   return unitTypes.map((unitType) => {
-    // Extract fields (handle different possible field names/casing)
-    const unitTypeId = getField(unitType, 'UnitTypeId', 'unitTypeId', 'Id', 'id') || '';
-    const name = getField(unitType, 'Name', 'name', 'UnitTypeName', 'unitTypeName') || 'Unknown';
-    const bedrooms = getField(unitType, 'Bedrooms', 'bedrooms', 'Beds', 'beds') || 0;
-    const bathrooms = getField(unitType, 'Bathrooms', 'bathrooms', 'Baths', 'baths') || 0;
-    const sqft = getField(unitType, 'SquareFeet', 'squareFeet', 'SQFT', 'sqft') || 0;
-    const minRent = getField(unitType, 'MinRent', 'minRent', 'Rent', 'rent', 'MinimumRent') || 0;
-    const maxRent = getField(unitType, 'MaxRent', 'maxRent', 'MaximumRent') || minRent;
-    const availableUnits = getField(unitType, 'AvailableUnits', 'availableUnits', 'Available', 'available') || 0;
-    const totalUnits = getField(unitType, 'TotalUnits', 'totalUnits', 'Total', 'total') || 0;
-    const imageUrl = getField(unitType, 'ImageUrl', 'imageUrl', 'Image', 'image') || '';
-    const description = getField(unitType, 'Description', 'description') || '';
+    // Extract fields from the actual API structure
+    const unitTypeId = unitType.identificationType?.idValue || '';
+    const name = unitType.name || unitType.lookUpCode || 'Unknown';
+    const bedrooms = parseInt(unitType.unitBedRooms) || 0;
+    const bathrooms = parseInt(unitType.unitBathrooms) || 0;
+    const sqft = parseInt(unitType.minSquareFeet) || parseInt(unitType.maxSquareFeet) || 0;
     
-    // Determine layout type from name
+    // Extract rent from the rent.termRent array
+    let minRent = 0;
+    if (unitType.minMarketRent) {
+      minRent = parseFloat(unitType.minMarketRent.replace(/,/g, '')) || 0;
+    } else if (unitType.rent?.termRent && Array.isArray(unitType.rent.termRent)) {
+      const rents = unitType.rent.termRent
+        .map((tr: any) => parseFloat(tr['@attributes']?.rent?.replace(/,/g, '') || '0'))
+        .filter((r: number) => r > 0);
+      minRent = rents.length > 0 ? Math.min(...rents) : 0;
+    }
+    
+    const maxRent = unitType.maxMarketRent ? parseFloat(unitType.maxMarketRent.replace(/,/g, '')) || minRent : minRent;
+    const totalUnits = parseInt(unitType.unitCount) || 0;
+    
+    // Check if sold out
+    const isSoldOut = unitType.rent?.termRent?.some((tr: any) => 
+      tr['@attributes']?.isSoldOut === true || tr['@attributes']?.isSoldOut === 'true'
+    ) || false;
+    
+    const availableUnits = isSoldOut ? 0 : totalUnits;
+    
+    // Determine layout type and tier from name
     const layoutType = determineLayoutType(name);
+    const tierFromName = name.toLowerCase().includes('elite') ? 'Elite' : 
+                        name.toLowerCase().includes('signature') ? 'Signature' :
+                        name.toLowerCase().includes('standard') ? 'Standard' : '';
     
     // Generate slug
     const cleanLayoutName = layoutType.toLowerCase().replace(/[^a-z0-9]+/g, '-');
@@ -293,16 +312,14 @@ function transformToWebflowItems(
     // Determine availability status
     const availabilityStatus = availableUnits > 0 ? 'available' : 'sold-out';
     
-    // Determine tier based on price per bed (adjust threshold as needed)
-    const isElite = pricePerBed >= 900;
-    
-    // Generate floorplan ID
-    const floorplanId = unitTypeId || `${config.entrataPropertyId}-${slug}`;
+    // Determine tier based on name or price
+    const isElite = tierFromName === 'Elite' || (tierFromName === '' && pricePerBed >= 900);
+    const isSignature = tierFromName === 'Signature' || (tierFromName === 'Standard' || (tierFromName === '' && pricePerBed < 900 && pricePerBed > 0));
     
     return {
       fieldData: {
         // Basic info - matches Webflow collection
-        'unit-name': `${bedrooms} Bed ${layoutType}`,
+        'unit-name': name,
         'slug': slug,
         
         // Custom fields - matches Webflow collection
@@ -312,11 +329,11 @@ function transformToWebflowItems(
         'starting-price': minRent,
         'available-units': availableUnits,
         'layout-type': layoutType,
-        'description': description || `${bedrooms} bedroom, ${bathrooms} bathroom ${layoutType} layout with ${sqft} sq ft.`,
-        'floor-plan-image': imageUrl,
-        'floorplan-id': floorplanId,
+        'description': `${bedrooms} bedroom, ${bathrooms} bathroom ${layoutType} layout with ${sqft} sq ft. ${tierFromName ? `${tierFromName} tier.` : ''}`,
+        'floor-plan-image': '', // No image in this API response
+        'floorplan-id': unitTypeId.toString(),
         'availability-status': availabilityStatus,
-        'tier-signature': !isElite,
+        'tier-signature': isSignature,
         'tier-elite': isElite,
         'price-per-bed': pricePerBed,
         'property-id': config.entrataPropertyId,
