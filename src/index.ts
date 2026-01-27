@@ -173,20 +173,56 @@ async function fetchEntrataUnitTypes(
   // Log the full response to understand structure
   console.log('  🔍 Entrata API Response:', JSON.stringify(data, null, 2));
   
-  // Extract unit types from response
-  // The path may vary - common paths to try:
-  const unitTypes = 
-    data.response?.result?.UnitTypes ||
-    data.response?.result?.unitTypes ||
-    data.response?.result?.PropertyUnitTypes ||
-    data.response?.result?.PhysicalProperty?.Property?.UnitType ||
-    data.response?.result || 
-    [];
+  // Extract unit types from response - try different possible paths
+  let unitTypes: any = null;
   
-  if (Array.isArray(unitTypes) && unitTypes.length > 0) {
+  // Try common paths
+  const possiblePaths = [
+    data.response?.result?.UnitTypes,
+    data.response?.result?.unitTypes,
+    data.response?.result?.PropertyUnitTypes,
+    data.response?.result?.PhysicalProperty?.Property?.UnitType,
+    data.response?.result?.Property?.UnitType,
+    data.response?.result
+  ];
+  
+  for (const path of possiblePaths) {
+    if (path && Array.isArray(path)) {
+      unitTypes = path;
+      break;
+    }
+  }
+  
+  // If still not found, check if result is an object with unit type data
+  if (!unitTypes && data.response?.result && typeof data.response.result === 'object') {
+    // Try to find an array property in result
+    const resultObj = data.response.result;
+    for (const key of Object.keys(resultObj)) {
+      if (Array.isArray(resultObj[key]) && resultObj[key].length > 0) {
+        console.log(`  ℹ️  Found array at: response.result.${key}`);
+        unitTypes = resultObj[key];
+        break;
+      }
+    }
+  }
+  
+  // If still not an array, wrap in array or return empty
+  if (!Array.isArray(unitTypes)) {
+    console.log('  ⚠️  Response is not an array. Full response structure:');
+    console.log('  ', JSON.stringify(data.response?.result, null, 2).substring(0, 500));
+    
+    // If it's a single object, wrap it in an array
+    if (unitTypes && typeof unitTypes === 'object') {
+      console.log('  ℹ️  Wrapping single object in array');
+      unitTypes = [unitTypes];
+    } else {
+      console.log('  ❌ Could not find unit types in response');
+      return [];
+    }
+  }
+  
+  if (unitTypes.length > 0) {
     console.log('  ✓ Sample unit type:', JSON.stringify(unitTypes[0], null, 2));
-  } else {
-    console.log('  ⚠️  No unit types found. Check API response structure above.');
   }
   
   return unitTypes;
