@@ -22,22 +22,20 @@ interface PropertyConfig {
   name?: string;              // Optional: friendly name for logs
 }
 
-// ============================================================================
-// UPDATED INTERFACE FOR FLOORPLANS (instead of individual units)
-// ============================================================================
 interface EntrataFloorplan {
   floorplanId: string;
-  floorplanName: string;      // "Corner", "Flat", "Townhouse"
-  bedrooms: number;           // 2, 3, 4
+  floorplanName: string;
+  bedrooms: number;
   bathrooms: number;
   sqft: number;
-  minRent?: number;           // Starting price
+  minRent?: number;
   maxRent?: number;
-  availableUnits?: number;    // Count of available units
+  availableUnits?: number;
   totalUnits?: number;
   imageUrl?: string;
-  layoutType?: string;        // "Corner", "Flat", "Townhouse"
-  tier?: string;              // "Signature" or "Elite" - if Entrata provides this
+  layoutType?: string;
+  tier?: string;
+  description?: string;
 }
 
 interface WebflowItem {
@@ -107,7 +105,7 @@ async function syncSingleProperty(
   console.log(`\n🏢 Syncing property: ${propertyName}`);
 
   try {
-    // 1. Fetch floorplans from Entrata (CHANGED FROM UNITS)
+    // 1. Fetch floorplans from Entrata
     console.log(`  📥 Fetching floorplans from Entrata...`);
     const entrataFloorplans = await fetchEntrataFloorplans(env, config.entrataPropertyId);
     console.log(`  ✓ Retrieved ${entrataFloorplans.length} floorplans from Entrata`);
@@ -128,13 +126,11 @@ async function syncSingleProperty(
 
 /**
  * Fetch floorplans from Entrata API
- * NOTE: You may need to adjust the method name and response path based on your Entrata API version
  */
 async function fetchEntrataFloorplans(
   env: Env,
   propertyId: string
 ): Promise<EntrataFloorplan[]> {
-  // Entrata API endpoint for floorplans
   const endpoint = `${env.ENTRATA_BASE_URL}/${env.ENTRATA_ORG}/v1/floorplans`;
   
   const response = await fetch(endpoint, {
@@ -149,13 +145,11 @@ async function fetchEntrataFloorplans(
       },
       requestId: '1',
       method: {
-        // NOTE: This method name may need to be adjusted based on your Entrata API
-        // Common options: 'getFloorPlans', 'getUnitTypes', 'getPropertyFloorPlans'
         name: 'getFloorPlans',
         params: {
           propertyIds: propertyId,
-          includeAvailability: true,  // Get availability counts
-          includePricing: true        // Get pricing info
+          includeAvailability: true,
+          includePricing: true
         }
       }
     })
@@ -174,8 +168,6 @@ async function fetchEntrataFloorplans(
   console.log('  🔍 Entrata API Response:', JSON.stringify(data, null, 2));
   
   // Extract floorplans from JSON-RPC response
-  // NOTE: This path may need adjustment based on actual API response structure
-  // Check the console logs to see the actual structure
   return data.response?.result?.FloorPlans || 
          data.response?.result?.PropertyFloorPlans || 
          data.response?.result || 
@@ -184,52 +176,58 @@ async function fetchEntrataFloorplans(
 
 /**
  * Transform Entrata floorplans to Webflow CMS items
+ * Field mappings match the Webflow collection structure
  */
 function transformToWebflowItems(
   entrataFloorplans: EntrataFloorplan[],
   config: PropertyConfig
 ): WebflowItem[] {
-  return entrataFloorplans.map((floorplan) => ({
-    fieldData: {
-      // Core fields - ADJUST THESE FIELD SLUGS TO MATCH YOUR WEBFLOW COLLECTION
-      name: floorplan.floorplanName || `${floorplan.bedrooms} Bedroom`,
-      slug: `${floorplan.bedrooms}bed-${(floorplan.floorplanName || floorplan.layoutType || 'standard').toLowerCase().replace(/[^a-z0-9]+/g, '-')}`,
-      
-      // Floorplan details
-      'floorplan-id': floorplan.floorplanId,
-      'floorplan-name': floorplan.floorplanName || '',
-      'layout-type': floorplan.layoutType || floorplan.floorplanName || '',
-      'bedrooms': floorplan.bedrooms || 0,
-      'bathrooms': floorplan.bathrooms || 0,
-      'square-feet': floorplan.sqft || 0,
-      
-      // Pricing
-      'starting-price': floorplan.minRent || 0,
-      'max-price': floorplan.maxRent || 0,
-      'price-per-bed': floorplan.minRent && floorplan.bedrooms 
-        ? Math.round(floorplan.minRent / floorplan.bedrooms) 
-        : 0,
-      
-      // Availability
-      'available-units': floorplan.availableUnits || 0,
-      'total-units': floorplan.totalUnits || 0,
-      'availability-status': (floorplan.availableUnits || 0) > 0 ? 'available' : 'sold-out',
-      
-      // Tier (adjust logic based on your needs)
-      // This is a placeholder - you may need to determine tier based on amenities or price
-      'tier-signature': true,  // TODO: Add logic to determine tier
-      'tier-elite': false,     // TODO: Add logic to determine tier
-      
-      // Media
-      'thumbnail-image': floorplan.imageUrl || '',
-      
-      // Property reference
-      'property-id': config.entrataPropertyId,
-      
-      // Timestamp
-      'last-synced': new Date().toISOString(),
-    },
-  }));
+  return entrataFloorplans.map((floorplan) => {
+    // Generate a clean slug for the floorplan
+    const layoutName = floorplan.layoutType || floorplan.floorplanName || 'standard';
+    const cleanLayoutName = layoutName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    const slug = `${floorplan.bedrooms}bed-${cleanLayoutName}`;
+    
+    // Calculate price per bedroom
+    const pricePerBed = floorplan.minRent && floorplan.bedrooms 
+      ? Math.round(floorplan.minRent / floorplan.bedrooms) 
+      : 0;
+    
+    // Determine availability status
+    const availabilityStatus = (floorplan.availableUnits || 0) > 0 ? 'available' : 'sold-out';
+    
+    // Determine tier (you can customize this logic)
+    // Example: Elite if rent is above $900/bed, otherwise Signature
+    const isElite = pricePerBed >= 900;
+    
+    return {
+      fieldData: {
+        // Basic info - matches your Webflow "Basic info" section
+        'unit-name': floorplan.floorplanName || `${floorplan.bedrooms} Bedroom ${layoutName}`,
+        'slug': slug,
+        
+        // Custom fields - matches your Webflow "Custom fields" section
+        'bedrooms': floorplan.bedrooms || 0,
+        'bathrooms': floorplan.bathrooms || 0,
+        'square-footage': floorplan.sqft || 0,
+        'starting-price': floorplan.minRent || 0,
+        'available-units': floorplan.availableUnits || 0,
+        'layout-type': layoutName,
+        'description': floorplan.description || '',
+        'floor-plan-image': floorplan.imageUrl || '',
+        'floorplan-id': floorplan.floorplanId,
+        'availability-status': availabilityStatus,
+        'tier-signature': !isElite,  // True if NOT elite
+        'tier-elite': isElite,        // True if elite
+        'price-per-bed': pricePerBed,
+        'property-id': config.entrataPropertyId,
+        
+        // Metadata
+        '_archived': false,
+        '_draft': false,
+      },
+    };
+  });
 }
 
 /**
