@@ -1,7 +1,7 @@
 /**
  * Entrata → Webflow CMS Sync Worker
  * Syncs FLOORPLAN data from Entrata API to Webflow CMS collections
- * Easily replicable for multiple properties
+ * Uses getUnitTypes method to fetch floorplan data
  */
 
 export interface Env {
@@ -16,25 +16,43 @@ export interface Env {
 }
 
 interface PropertyConfig {
-  entrataPropertyId: string;  // Variable 1: Entrata property ID
-  webflowSiteId: string;      // Variable 2: Webflow site ID  
-  webflowCollectionId: string; // Variable 3: Webflow collection ID
-  name?: string;              // Optional: friendly name for logs
+  entrataPropertyId: string;
+  webflowSiteId: string;
+  webflowCollectionId: string;
+  name?: string;
 }
 
-interface EntrataFloorplan {
-  floorplanId: string;
-  floorplanName: string;
-  bedrooms: number;
-  bathrooms: number;
-  sqft: number;
+interface EntrataUnitType {
+  // Common fields - adjust based on actual API response
+  UnitTypeId?: string;
+  unitTypeId?: string;
+  Name?: string;
+  name?: string;
+  UnitTypeName?: string;
+  unitTypeName?: string;
+  Bedrooms?: number;
+  bedrooms?: number;
+  Beds?: number;
+  beds?: number;
+  Bathrooms?: number;
+  bathrooms?: number;
+  Baths?: number;
+  baths?: number;
+  SquareFeet?: number;
+  squareFeet?: number;
+  SQFT?: number;
+  sqft?: number;
+  MinRent?: number;
   minRent?: number;
+  MaxRent?: number;
   maxRent?: number;
+  AvailableUnits?: number;
   availableUnits?: number;
+  TotalUnits?: number;
   totalUnits?: number;
+  ImageUrl?: string;
   imageUrl?: string;
-  layoutType?: string;
-  tier?: string;
+  Description?: string;
   description?: string;
 }
 
@@ -43,7 +61,6 @@ interface WebflowItem {
 }
 
 export default {
-  // Scheduled handler for cron triggers
   async scheduled(
     event: ScheduledEvent,
     env: Env,
@@ -53,11 +70,9 @@ export default {
     ctx.waitUntil(syncAllProperties(env));
   },
 
-  // HTTP handler for manual triggers
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
     
-    // Manual trigger endpoint
     if (url.pathname === '/sync' && request.method === 'POST') {
       try {
         await syncAllProperties(env);
@@ -74,13 +89,9 @@ export default {
   },
 };
 
-/**
- * Sync all configured properties
- */
 async function syncAllProperties(env: Env): Promise<void> {
   try {
     const properties: PropertyConfig[] = JSON.parse(env.PROPERTIES);
-    
     console.log(`📋 Found ${properties.length} property configuration(s)`);
 
     for (const property of properties) {
@@ -94,9 +105,6 @@ async function syncAllProperties(env: Env): Promise<void> {
   }
 }
 
-/**
- * Sync a single property from Entrata to Webflow
- */
 async function syncSingleProperty(
   env: Env,
   config: PropertyConfig
@@ -105,19 +113,19 @@ async function syncSingleProperty(
   console.log(`\n🏢 Syncing property: ${propertyName}`);
 
   try {
-    // 1. Fetch floorplans from Entrata
-    console.log(`  📥 Fetching floorplans from Entrata...`);
-    const entrataFloorplans = await fetchEntrataFloorplans(env, config.entrataPropertyId);
-    console.log(`  ✓ Retrieved ${entrataFloorplans.length} floorplans from Entrata`);
+    // 1. Fetch unit types (floorplans) from Entrata
+    console.log(`  📥 Fetching unit types from Entrata...`);
+    const unitTypes = await fetchEntrataUnitTypes(env, config.entrataPropertyId);
+    console.log(`  ✓ Retrieved ${unitTypes.length} unit types from Entrata`);
 
     // 2. Transform to Webflow format
     console.log(`  🔄 Transforming data...`);
-    const webflowItems = transformToWebflowItems(entrataFloorplans, config);
+    const webflowItems = transformToWebflowItems(unitTypes, config);
 
     // 3. Sync to Webflow CMS
     console.log(`  📤 Syncing to Webflow CMS...`);
     await syncToWebflow(env, config, webflowItems);
-    console.log(`  ✅ Successfully synced ${webflowItems.length} floorplans to Webflow`);
+    console.log(`  ✅ Successfully synced ${webflowItems.length} unit types to Webflow`);
   } catch (error) {
     console.error(`  ❌ Failed to sync property ${propertyName}:`, error);
     throw error;
@@ -125,13 +133,13 @@ async function syncSingleProperty(
 }
 
 /**
- * Fetch floorplans from Entrata API
+ * Fetch unit types (floorplans) from Entrata API using getUnitTypes method
  */
-async function fetchEntrataFloorplans(
+async function fetchEntrataUnitTypes(
   env: Env,
   propertyId: string
-): Promise<EntrataFloorplan[]> {
-  const endpoint = `${env.ENTRATA_BASE_URL}/${env.ENTRATA_ORG}/v1/floorplans`;
+): Promise<EntrataUnitType[]> {
+  const endpoint = `${env.ENTRATA_BASE_URL}/${env.ENTRATA_ORG}/v1/propertyunits`;
   
   const response = await fetch(endpoint, {
     method: 'POST',
@@ -145,11 +153,9 @@ async function fetchEntrataFloorplans(
       },
       requestId: '1',
       method: {
-        name: 'getFloorPlans',
+        name: 'getUnitTypes',
         params: {
-          propertyIds: propertyId,
-          includeAvailability: true,
-          includePricing: true
+          propertyIds: propertyId
         }
       }
     })
@@ -164,61 +170,118 @@ async function fetchEntrataFloorplans(
 
   const data = await response.json();
   
-  // Log the full response to help debug
+  // Log the full response to understand structure
   console.log('  🔍 Entrata API Response:', JSON.stringify(data, null, 2));
   
-  // Extract floorplans from JSON-RPC response
-  return data.response?.result?.FloorPlans || 
-         data.response?.result?.PropertyFloorPlans || 
-         data.response?.result || 
-         [];
+  // Extract unit types from response
+  // The path may vary - common paths to try:
+  const unitTypes = 
+    data.response?.result?.UnitTypes ||
+    data.response?.result?.unitTypes ||
+    data.response?.result?.PropertyUnitTypes ||
+    data.response?.result?.PhysicalProperty?.Property?.UnitType ||
+    data.response?.result || 
+    [];
+  
+  if (Array.isArray(unitTypes) && unitTypes.length > 0) {
+    console.log('  ✓ Sample unit type:', JSON.stringify(unitTypes[0], null, 2));
+  } else {
+    console.log('  ⚠️  No unit types found. Check API response structure above.');
+  }
+  
+  return unitTypes;
 }
 
 /**
- * Transform Entrata floorplans to Webflow CMS items
- * Field mappings match the Webflow collection structure
+ * Helper function to safely get field value (handles different casing)
+ */
+function getField(obj: any, ...fieldNames: string[]): any {
+  for (const fieldName of fieldNames) {
+    if (obj[fieldName] !== undefined) {
+      return obj[fieldName];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Determine layout type from unit type name
+ */
+function determineLayoutType(name: string): string {
+  if (!name) return 'Standard';
+  
+  const lowerName = name.toLowerCase();
+  
+  if (lowerName.includes('corner')) return 'Corner';
+  if (lowerName.includes('townhouse') || lowerName.includes('town house')) return 'Townhouse';
+  if (lowerName.includes('flat')) return 'Flat';
+  if (lowerName.includes('penthouse')) return 'Penthouse';
+  if (lowerName.includes('loft')) return 'Loft';
+  if (lowerName.includes('studio')) return 'Studio';
+  
+  // Return the name itself if no keyword matches
+  return name;
+}
+
+/**
+ * Transform Entrata unit types to Webflow CMS items
  */
 function transformToWebflowItems(
-  entrataFloorplans: EntrataFloorplan[],
+  unitTypes: EntrataUnitType[],
   config: PropertyConfig
 ): WebflowItem[] {
-  return entrataFloorplans.map((floorplan) => {
-    // Generate a clean slug for the floorplan
-    const layoutName = floorplan.layoutType || floorplan.floorplanName || 'standard';
-    const cleanLayoutName = layoutName.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const slug = `${floorplan.bedrooms}bed-${cleanLayoutName}`;
+  return unitTypes.map((unitType) => {
+    // Extract fields (handle different possible field names/casing)
+    const unitTypeId = getField(unitType, 'UnitTypeId', 'unitTypeId', 'Id', 'id') || '';
+    const name = getField(unitType, 'Name', 'name', 'UnitTypeName', 'unitTypeName') || 'Unknown';
+    const bedrooms = getField(unitType, 'Bedrooms', 'bedrooms', 'Beds', 'beds') || 0;
+    const bathrooms = getField(unitType, 'Bathrooms', 'bathrooms', 'Baths', 'baths') || 0;
+    const sqft = getField(unitType, 'SquareFeet', 'squareFeet', 'SQFT', 'sqft') || 0;
+    const minRent = getField(unitType, 'MinRent', 'minRent', 'Rent', 'rent', 'MinimumRent') || 0;
+    const maxRent = getField(unitType, 'MaxRent', 'maxRent', 'MaximumRent') || minRent;
+    const availableUnits = getField(unitType, 'AvailableUnits', 'availableUnits', 'Available', 'available') || 0;
+    const totalUnits = getField(unitType, 'TotalUnits', 'totalUnits', 'Total', 'total') || 0;
+    const imageUrl = getField(unitType, 'ImageUrl', 'imageUrl', 'Image', 'image') || '';
+    const description = getField(unitType, 'Description', 'description') || '';
+    
+    // Determine layout type from name
+    const layoutType = determineLayoutType(name);
+    
+    // Generate slug
+    const cleanLayoutName = layoutType.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+    const slug = `${bedrooms}bed-${cleanLayoutName}`;
     
     // Calculate price per bedroom
-    const pricePerBed = floorplan.minRent && floorplan.bedrooms 
-      ? Math.round(floorplan.minRent / floorplan.bedrooms) 
-      : 0;
+    const pricePerBed = minRent && bedrooms ? Math.round(minRent / bedrooms) : 0;
     
     // Determine availability status
-    const availabilityStatus = (floorplan.availableUnits || 0) > 0 ? 'available' : 'sold-out';
+    const availabilityStatus = availableUnits > 0 ? 'available' : 'sold-out';
     
-    // Determine tier (you can customize this logic)
-    // Example: Elite if rent is above $900/bed, otherwise Signature
+    // Determine tier based on price per bed (adjust threshold as needed)
     const isElite = pricePerBed >= 900;
+    
+    // Generate floorplan ID
+    const floorplanId = unitTypeId || `${config.entrataPropertyId}-${slug}`;
     
     return {
       fieldData: {
-        // Basic info - matches your Webflow "Basic info" section
-        'unit-name': floorplan.floorplanName || `${floorplan.bedrooms} Bedroom ${layoutName}`,
+        // Basic info - matches Webflow collection
+        'unit-name': `${bedrooms} Bed ${layoutType}`,
         'slug': slug,
         
-        // Custom fields - matches your Webflow "Custom fields" section
-        'bedrooms': floorplan.bedrooms || 0,
-        'bathrooms': floorplan.bathrooms || 0,
-        'square-footage': floorplan.sqft || 0,
-        'starting-price': floorplan.minRent || 0,
-        'available-units': floorplan.availableUnits || 0,
-        'layout-type': layoutName,
-        'description': floorplan.description || '',
-        'floor-plan-image': floorplan.imageUrl || '',
-        'floorplan-id': floorplan.floorplanId,
+        // Custom fields - matches Webflow collection
+        'bedrooms': bedrooms,
+        'bathrooms': bathrooms,
+        'square-footage': sqft,
+        'starting-price': minRent,
+        'available-units': availableUnits,
+        'layout-type': layoutType,
+        'description': description || `${bedrooms} bedroom, ${bathrooms} bathroom ${layoutType} layout with ${sqft} sq ft.`,
+        'floor-plan-image': imageUrl,
+        'floorplan-id': floorplanId,
         'availability-status': availabilityStatus,
-        'tier-signature': !isElite,  // True if NOT elite
-        'tier-elite': isElite,        // True if elite
+        'tier-signature': !isElite,
+        'tier-elite': isElite,
         'price-per-bed': pricePerBed,
         'property-id': config.entrataPropertyId,
         
@@ -244,8 +307,6 @@ async function syncToWebflow(
   }
 
   const endpoint = `https://api.webflow.com/v2/collections/${config.webflowCollectionId}/items`;
-
-  // Webflow bulk endpoint supports up to 100 items per request
   const batchSize = 100;
   
   for (let i = 0; i < items.length; i += batchSize) {
@@ -275,7 +336,6 @@ async function syncToWebflow(
     const result = await response.json();
     console.log(`    ✓ Batch synced: ${result.items?.length || 0} items`);
 
-    // Rate limiting: wait between batches
     if (i + batchSize < items.length) {
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
