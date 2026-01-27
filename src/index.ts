@@ -309,8 +309,8 @@ function transformToWebflowItems(
     // Calculate price per bedroom
     const pricePerBed = minRent && bedrooms ? Math.round(minRent / bedrooms) : 0;
     
-    // Determine availability status
-    const availabilityStatus = availableUnits > 0 ? 'available' : 'sold-out';
+    // Determine availability status - use exact Webflow option values
+    const availabilityStatus = availableUnits > 0 ? 'Available' : 'Sold-out';
     
     // Determine tier based on name or price
     const isElite = tierFromName === 'Elite' || (tierFromName === '' && pricePerBed >= 900);
@@ -318,11 +318,11 @@ function transformToWebflowItems(
     
     return {
       fieldData: {
-        // Basic info - matches Webflow collection
-        'name': name,  // Changed from 'unit-name' to 'name'
+        // Basic info
+        'name': name,
         'slug': slug,
         
-        // Custom fields - matches Webflow collection
+        // Custom fields - matching exact Webflow collection order
         'bedrooms': bedrooms,
         'bathrooms': bathrooms,
         'square-footage': sqft,
@@ -330,7 +330,7 @@ function transformToWebflowItems(
         'available-units': availableUnits,
         'layout-type': layoutType,
         'description': `${bedrooms} bedroom, ${bathrooms} bathroom ${layoutType} layout with ${sqft} sq ft. ${tierFromName ? `${tierFromName} tier.` : ''}`,
-        'floor-plan-image': '', // No image in this API response
+        'floor-plan-image': '',
         'floorplan-id': unitTypeId.toString(),
         'availability-status': availabilityStatus,
         'tier-signature': isSignature,
