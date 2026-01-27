@@ -155,7 +155,7 @@ async function fetchEntrataUnitTypes(
       method: {
         name: 'getUnitTypes',
         params: {
-          propertyIds: propertyId
+          propertyId: propertyId
         }
       }
     })
