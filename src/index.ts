@@ -303,8 +303,7 @@ function transformToWebflowItems(
                         name.toLowerCase().includes('standard') ? 'Standard' : '';
     
     // Generate slug
-    const cleanLayoutName = layoutType.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-    const slug = `${bedrooms}bed-${cleanLayoutName}`;
+    const slug = unitTypeId.toString();
     
     // Calculate price per bedroom
     const pricePerBed = minRent && bedrooms ? Math.round(minRent / bedrooms) : 0;
@@ -359,38 +358,93 @@ async function syncToWebflow(
     return;
   }
 
-  const endpoint = `https://api.webflow.com/v2/collections/${config.webflowCollectionId}/items`;
-  const batchSize = 100;
+  // 1. Fetch existing items from Webflow to check for duplicates
+  console.log('  📥 Fetching existing items from Webflow...');
   
-  for (let i = 0; i < items.length; i += batchSize) {
-    const batch = items.slice(i, i + batchSize);
-    
-    console.log(`    Syncing batch ${Math.floor(i / batchSize) + 1} (${batch.length} items)...`);
+  const listEndpoint = `https://api.webflow.com/v2/collections/${config.webflowCollectionId}/items`;
+  const existingItemsResponse = await fetch(listEndpoint, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${env.WEBFLOW_API_TOKEN}`,
+      'accept': 'application/json',
+    },
+  });
 
-    const response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${env.WEBFLOW_API_TOKEN}`,
-        'Content-Type': 'application/json',
-        'accept': 'application/json',
-      },
-      body: JSON.stringify({
-        items: batch,
-      }),
-    });
+  if (!existingItemsResponse.ok) {
+    const errorText = await existingItemsResponse.text();
+    throw new Error(
+      `Webflow API failed to fetch existing items: ${existingItemsResponse.status} - ${errorText}`
+    );
+  }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(
-        `Webflow API failed: ${response.status} - ${errorText}`
-      );
-    }
-
-    const result = await response.json();
-    console.log(`    ✓ Batch synced: ${result.items?.length || 0} items`);
-
-    if (i + batchSize < items.length) {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+  const existingData = await existingItemsResponse.json();
+  const existingItems = existingData.items || [];
+  
+  // Create a map of existing items by floorplan-id
+  const existingItemsMap = new Map<string, any>();
+  for (const item of existingItems) {
+    const floorplanId = item.fieldData?.['floorplan-id'];
+    if (floorplanId) {
+      existingItemsMap.set(floorplanId, item);
     }
   }
-}
+  
+  console.log(`  ℹ️  Found ${existingItems.length} existing items in Webflow`);
+
+  // 2. Process each item: update existing or create new
+  let createdCount = 0;
+  let updatedCount = 0;
+
+  for (const item of items) {
+    const floorplanId = item.fieldData['floorplan-id'];
+    const existingItem = existingItemsMap.get(floorplanId);
+
+    if (existingItem) {
+      // Update existing item
+      const updateEndpoint = `https://api.webflow.com/v2/collections/${config.webflowCollectionId}/items/${existingItem.id}`;
+      const updateResponse = await fetch(updateEndpoint, {
+        method: 'PATCH',
+        headers: {
+          'Authorization': `Bearer ${env.WEBFLOW_API_TOKEN}`,
+          'Content-Type': 'application/json',
+          'accept': 'application/json',
+        },
+        body: JSON.stringify({
+          fieldData: item.fieldData,
+        }),
+      });
+
+      if (!updateResponse.ok) {
+        const errorText = await updateResponse.text();
+        console.error(`  ❌ Failed to update item ${floorplanId}:`, errorText);
+      } else {
+        updatedCount++;
+      }
+    } else {
+      // Create new item
+      const createEndpoint = `https://api.webflow.com/v2/collections/${config.webflowCollectionId}/items`;
+      const createResponse = await fetch(createEndpoint, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${env.WEBFLOW_API_TOKEN}`,
+          'Content-Type': 'application/json',
+          'accept': 'application/json',
+        },
+        body: JSON.stringify({
+          fieldData: item.fieldData,
+        }),
+      });
+
+      if (!createResponse.ok) {
+        const errorText = await createResponse.text();
+        console.error(`  ❌ Failed to create item ${floorplanId}:`, errorText);
+      } else {
+        createdCount++;
+      }
+    }
+
+    // Small delay to avoid rate limiting
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  console.log(`  ✅ Created ${createdCount} new items, updated ${updatedCount} existing items`);
