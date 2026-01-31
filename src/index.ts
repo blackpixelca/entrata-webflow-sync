@@ -318,8 +318,7 @@ function transformToWebflowItems(
     return {
       fieldData: {
         // Basic info
-        'name': name,
-        'slug': slug,
+        'name': layoutType,        'slug': slug,
         
         // Custom fields - matching exact Webflow collection order
         'bedrooms': bedrooms,
