@@ -10,7 +10,7 @@ export interface Env {
   ENTRATA_BASE_URL: string;
   ENTRATA_ORG: string;
   WEBFLOW_API_TOKEN: string;
-  
+
   // JSON array of property configurations
   PROPERTIES: string;
 }
@@ -72,7 +72,7 @@ export default {
 
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
-    
+
     if (url.pathname === '/sync' && request.method === 'POST') {
       try {
         await syncAllProperties(env);
@@ -126,6 +126,11 @@ async function syncSingleProperty(
     console.log(`  📤 Syncing to Webflow CMS...`);
     await syncToWebflow(env, config, webflowItems);
     console.log(`  ✅ Successfully synced ${webflowItems.length} unit types to Webflow`);
+
+    // 4. Publish Webflow site
+    console.log(`  🚀 Publishing Webflow site...`);
+    await publishWebflowSite(env, config.webflowSiteId);
+    console.log(`  ✅ Webflow site published`);
   } catch (error) {
     console.error(`  ❌ Failed to sync property ${propertyName}:`, error);
     throw error;
@@ -140,7 +145,7 @@ async function fetchEntrataUnitTypes(
   propertyId: string
 ): Promise<EntrataUnitType[]> {
   const endpoint = `${env.ENTRATA_BASE_URL}/${env.ENTRATA_ORG}/v1/propertyunits`;
-  
+
   const response = await fetch(endpoint, {
     method: 'POST',
     headers: {
@@ -169,13 +174,13 @@ async function fetchEntrataUnitTypes(
   }
 
   const data = await response.json();
-  
+
   // Log the full response to understand structure
   console.log('  🔍 Entrata API Response:', JSON.stringify(data, null, 2));
-  
+
   // Extract unit types from response - try different possible paths
   let unitTypes: any = null;
-  
+
   // Try common paths
   const possiblePaths = [
     data.response?.result?.unitTypes?.unitType,  // Correct path for this API
@@ -186,14 +191,14 @@ async function fetchEntrataUnitTypes(
     data.response?.result?.Property?.UnitType,
     data.response?.result
   ];
-  
+
   for (const path of possiblePaths) {
     if (path && Array.isArray(path)) {
       unitTypes = path;
       break;
     }
   }
-  
+
   // If still not found, check if result is an object with unit type data
   if (!unitTypes && data.response?.result && typeof data.response.result === 'object') {
     // Try to find an array property in result
@@ -206,12 +211,12 @@ async function fetchEntrataUnitTypes(
       }
     }
   }
-  
+
   // If still not an array, wrap in array or return empty
   if (!Array.isArray(unitTypes)) {
     console.log('  ⚠️  Response is not an array. Full response structure:');
     console.log('  ', JSON.stringify(data.response?.result, null, 2).substring(0, 500));
-    
+
     // If it's a single object, wrap it in an array
     if (unitTypes && typeof unitTypes === 'object') {
       console.log('  ℹ️  Wrapping single object in array');
@@ -221,11 +226,11 @@ async function fetchEntrataUnitTypes(
       return [];
     }
   }
-  
+
   if (unitTypes.length > 0) {
     console.log('  ✓ Sample unit type:', JSON.stringify(unitTypes[0], null, 2));
   }
-  
+
   return unitTypes;
 }
 
@@ -246,18 +251,18 @@ function getField(obj: any, ...fieldNames: string[]): any {
  */
 function determineLayoutType(name: string): string {
   if (!name) return 'Standard';
-  
+
   const lowerName = name.toLowerCase();
-  
+
   if (lowerName.includes('corner')) return 'Corner';
   if (lowerName.includes('townhouse') || lowerName.includes('town house')) return 'Townhouse';
   if (lowerName.includes('flat')) return 'Flat';
   if (lowerName.includes('penthouse')) return 'Penthouse';
   if (lowerName.includes('loft')) return 'Loft';
   if (lowerName.includes('studio')) return 'Studio';
-  
-  // Return the name itself if no keyword matches
-  return name;
+
+  // Default to Standard if no layout keyword is found
+  return 'Standard';
 }
 
 /**
@@ -274,7 +279,7 @@ function transformToWebflowItems(
     const bedrooms = parseInt(unitType.unitBedRooms) || 0;
     const bathrooms = parseInt(unitType.unitBathrooms) || 0;
     const sqft = parseInt(unitType.minSquareFeet) || parseInt(unitType.maxSquareFeet) || 0;
-    
+
     // Extract rent from the rent.termRent array
     let minRent = 0;
     if (unitType.minMarketRent) {
@@ -285,41 +290,42 @@ function transformToWebflowItems(
         .filter((r: number) => r > 0);
       minRent = rents.length > 0 ? Math.min(...rents) : 0;
     }
-    
+
     const maxRent = unitType.maxMarketRent ? parseFloat(unitType.maxMarketRent.replace(/,/g, '')) || minRent : minRent;
     const totalUnits = parseInt(unitType.unitCount) || 0;
-    
+
     // Check if sold out
-    const isSoldOut = unitType.rent?.termRent?.some((tr: any) => 
+    const isSoldOut = unitType.rent?.termRent?.some((tr: any) =>
       tr['@attributes']?.isSoldOut === true || tr['@attributes']?.isSoldOut === 'true'
     ) || false;
-    
+
     const availableUnits = isSoldOut ? 0 : totalUnits;
-    
+
     // Determine layout type and tier from name
     const layoutType = determineLayoutType(name);
-    const tierFromName = name.toLowerCase().includes('elite') ? 'Elite' : 
+    const tierFromName = name.toLowerCase().includes('elite') ? 'Elite' :
                         name.toLowerCase().includes('signature') ? 'Signature' :
                         name.toLowerCase().includes('standard') ? 'Standard' : '';
-    
+
     // Generate slug
     const slug = unitTypeId.toString();
-    
+
     // Calculate price per bedroom
     const pricePerBed = minRent && bedrooms ? Math.round(minRent / bedrooms) : 0;
-    
+
     // Determine availability status - use exact Webflow option values
     const availabilityStatus = availableUnits > 0 ? 'Available' : 'Sold-out';
-    
+
     // Determine tier based on name or price
     const isElite = tierFromName === 'Elite' || (tierFromName === '' && pricePerBed >= 900);
     const isSignature = tierFromName === 'Signature' || (tierFromName === 'Standard' || (tierFromName === '' && pricePerBed < 900 && pricePerBed > 0));
-    
+
     return {
       fieldData: {
         // Basic info
-        'name': layoutType,        'slug': slug,
-        
+        'name': layoutType,
+        'slug': slug,
+
         // Custom fields - matching exact Webflow collection order
         'bedrooms': bedrooms,
         'bathrooms': bathrooms,
@@ -335,13 +341,59 @@ function transformToWebflowItems(
         'tier-elite': isElite,
         'price-per-bed': pricePerBed,
         'property-id': config.entrataPropertyId,
-        
+
         // Metadata
         '_archived': false,
         '_draft': false,
       },
     };
   });
+}
+
+/**
+ * Fetch all existing items from Webflow with pagination
+ */
+async function fetchAllWebflowItems(
+  env: Env,
+  collectionId: string
+): Promise<any[]> {
+  const allItems: any[] = [];
+  let offset = 0;
+  const limit = 100;
+
+  while (true) {
+    const listEndpoint = `https://api.webflow.com/v2/collections/${collectionId}/items?limit=${limit}&offset=${offset}`;
+    const response = await fetch(listEndpoint, {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${env.WEBFLOW_API_TOKEN}`,
+        'accept': 'application/json',
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(
+        `Webflow API failed to fetch existing items: ${response.status} - ${errorText}`
+      );
+    }
+
+    const data = await response.json();
+    const items = data.items || [];
+    allItems.push(...items);
+
+    // Check if there are more items to fetch
+    if (items.length < limit) {
+      break;
+    }
+
+    offset += limit;
+
+    // Small delay to avoid rate limiting
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  return allItems;
 }
 
 /**
@@ -357,28 +409,10 @@ async function syncToWebflow(
     return;
   }
 
-  // 1. Fetch existing items from Webflow to check for duplicates
+  // 1. Fetch ALL existing items from Webflow (with pagination)
   console.log('  📥 Fetching existing items from Webflow...');
-  
-  const listEndpoint = `https://api.webflow.com/v2/collections/${config.webflowCollectionId}/items`;
-  const existingItemsResponse = await fetch(listEndpoint, {
-    method: 'GET',
-    headers: {
-      'Authorization': `Bearer ${env.WEBFLOW_API_TOKEN}`,
-      'accept': 'application/json',
-    },
-  });
+  const existingItems = await fetchAllWebflowItems(env, config.webflowCollectionId);
 
-  if (!existingItemsResponse.ok) {
-    const errorText = await existingItemsResponse.text();
-    throw new Error(
-      `Webflow API failed to fetch existing items: ${existingItemsResponse.status} - ${errorText}`
-    );
-  }
-
-  const existingData = await existingItemsResponse.json();
-  const existingItems = existingData.items || [];
-  
   // Create a map of existing items by floorplan-id
   const existingItemsMap = new Map<string, any>();
   for (const item of existingItems) {
@@ -387,7 +421,7 @@ async function syncToWebflow(
       existingItemsMap.set(floorplanId, item);
     }
   }
-  
+
   console.log(`  ℹ️  Found ${existingItems.length} existing items in Webflow`);
 
   // 2. Process each item: update existing or create new
@@ -446,4 +480,67 @@ async function syncToWebflow(
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 
-  console.log(`  ✅ Created ${createdCount} new items, updated ${updatedCount} existing items`);
+  // 3. Delete items that no longer exist in Entrata
+  const incomingFloorplanIds = new Set(items.map((item) => item.fieldData['floorplan-id']));
+  const itemsToDelete: any[] = [];
+
+  for (const [floorplanId, existingItem] of existingItemsMap) {
+    if (!incomingFloorplanIds.has(floorplanId)) {
+      itemsToDelete.push(existingItem);
+    }
+  }
+
+  let deletedCount = 0;
+  for (const item of itemsToDelete) {
+    const deleteEndpoint = `https://api.webflow.com/v2/collections/${config.webflowCollectionId}/items/${item.id}`;
+    const deleteResponse = await fetch(deleteEndpoint, {
+      method: 'DELETE',
+      headers: {
+        'Authorization': `Bearer ${env.WEBFLOW_API_TOKEN}`,
+        'accept': 'application/json',
+      },
+    });
+
+    if (!deleteResponse.ok) {
+      const errorText = await deleteResponse.text();
+      console.error(`  ❌ Failed to delete item ${item.fieldData?.['floorplan-id']}:`, errorText);
+    } else {
+      deletedCount++;
+    }
+
+    // Small delay to avoid rate limiting
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+
+  console.log(`  ✅ Created ${createdCount} new items, updated ${updatedCount} existing items, deleted ${deletedCount} stale items`);
+}
+
+/**
+ * Publish Webflow site to make CMS changes live
+ */
+async function publishWebflowSite(
+  env: Env,
+  siteId: string
+): Promise<void> {
+  const publishEndpoint = `https://api.webflow.com/v2/sites/${siteId}/publish`;
+
+  const response = await fetch(publishEndpoint, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${env.WEBFLOW_API_TOKEN}`,
+      'Content-Type': 'application/json',
+      'accept': 'application/json',
+    },
+    body: JSON.stringify({
+      publishToWebflowSubdomain: true,
+      publishToCustomDomains: true,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Webflow publish failed: ${response.status} - ${errorText}`);
+  }
+
+  console.log('  ✅ Published Webflow site');
+}
