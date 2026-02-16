@@ -60,6 +60,23 @@ interface WebflowItem {
   fieldData: Record<string, any>;
 }
 
+interface ParsedFloorplan {
+  unitTypeId: string;
+  name: string;
+  bedrooms: number;
+  bathrooms: number;
+  sqft: number;
+  minRent: number;
+  maxRent: number;
+  availableUnits: number;
+  layoutType: string;
+  tierFromName: string;
+  isElite: boolean;
+  isSignature: boolean;
+  pricePerBed: number;
+  propertyId: string;
+}
+
 export default {
   async scheduled(
     event: ScheduledEvent,
@@ -125,7 +142,7 @@ async function syncSingleProperty(
     // 3. Sync to Webflow CMS
     console.log(`  📤 Syncing to Webflow CMS...`);
     await syncToWebflow(env, config, webflowItems);
-    console.log(`  ✅ Successfully synced ${webflowItems.length} unit types to Webflow`);
+    console.log(`  ✅ Successfully synced ${webflowItems.length} grouped floorplans to Webflow`);
 
     // 4. Publish Webflow site
     console.log(`  🚀 Publishing Webflow site...`);
@@ -266,14 +283,15 @@ function determineLayoutType(name: string): string {
 }
 
 /**
- * Transform Entrata unit types to Webflow CMS items
+ * Transform Entrata unit types to Webflow CMS items.
+ * Groups floorplans by layoutType + bedrooms + bathrooms into a single CMS entry.
  */
 function transformToWebflowItems(
   unitTypes: EntrataUnitType[],
   config: PropertyConfig
 ): WebflowItem[] {
-  return unitTypes.map((unitType) => {
-    // Extract fields from the actual API structure
+  // ── Phase 1: Parse each unit type into an intermediate representation ──
+  const parsed: ParsedFloorplan[] = unitTypes.map((unitType) => {
     const unitTypeId = unitType.identificationType?.idValue || '';
     const name = unitType.name || unitType.lookUpCode || 'Unknown';
     const bedrooms = parseInt(unitType.unitBedRooms) || 0;
@@ -307,38 +325,133 @@ function transformToWebflowItems(
                         name.toLowerCase().includes('signature') ? 'Signature' :
                         name.toLowerCase().includes('standard') ? 'Standard' : '';
 
-    // Generate slug
-    const slug = unitTypeId.toString();
-
     // Calculate price per bedroom
     const pricePerBed = minRent && bedrooms ? Math.round(minRent / bedrooms) : 0;
-
-    // Determine availability status - use exact Webflow option values
-    const availabilityStatus = availableUnits > 0 ? 'Available' : 'Sold-out';
 
     // Determine tier based on name or price
     const isElite = tierFromName === 'Elite' || (tierFromName === '' && pricePerBed >= 900);
     const isSignature = tierFromName === 'Signature' || (tierFromName === 'Standard' || (tierFromName === '' && pricePerBed < 900 && pricePerBed > 0));
 
     return {
+      unitTypeId,
+      name,
+      bedrooms,
+      bathrooms,
+      sqft,
+      minRent,
+      maxRent,
+      availableUnits,
+      layoutType,
+      tierFromName,
+      isElite,
+      isSignature,
+      pricePerBed,
+      propertyId: config.entrataPropertyId,
+    };
+  });
+
+  // ── Phase 2: Group by layoutType-bedrooms-bathrooms ──
+  const groups = new Map<string, ParsedFloorplan[]>();
+  for (const fp of parsed) {
+    const groupKey = `${fp.layoutType.toLowerCase()}-${fp.bedrooms}b-${fp.bathrooms}b`;
+    if (!groups.has(groupKey)) {
+      groups.set(groupKey, []);
+    }
+    groups.get(groupKey)!.push(fp);
+  }
+
+  console.log(`  ℹ️  Grouped ${parsed.length} floorplans into ${groups.size} unique entries`);
+
+  // ── Phase 3: Merge each group into a single WebflowItem ──
+  const results: WebflowItem[] = [];
+
+  for (const [slug, members] of groups) {
+    // Floorplan IDs: comma-separated list of all grouped IDs
+    const floorplanIds = members.map(m => m.unitTypeId).join(',');
+
+    // Use the first member's values for layout type, bedrooms, bathrooms (same across group)
+    const bedrooms = members[0].bedrooms;
+    const bathrooms = members[0].bathrooms;
+    const layoutType = members[0].layoutType;
+
+    // Starting price logic:
+    //   - If both tiers have prices, use the smaller amount
+    //   - If only one tier has a price, use that (ignore $0/null from unavailable tier)
+    //   - If neither tier has a price, set to 0
+    const rentsWithValues = members.map(m => m.minRent).filter(r => r > 0);
+    const startingPrice = rentsWithValues.length > 0 ? Math.min(...rentsWithValues) : 0;
+
+    // Square footage: average across group
+    const sqftValues = members.map(m => m.sqft).filter(s => s > 0);
+    const avgSqft = sqftValues.length > 0
+      ? Math.round(sqftValues.reduce((sum, s) => sum + s, 0) / sqftValues.length)
+      : 0;
+
+    // Square footage range for description
+    const minSqft = sqftValues.length > 0 ? Math.min(...sqftValues) : 0;
+    const maxSqft = sqftValues.length > 0 ? Math.max(...sqftValues) : 0;
+
+    // Tier booleans: true if ANY member is that tier
+    const tierSignature = members.some(m => m.isSignature);
+    const tierElite = members.some(m => m.isElite);
+
+    // Tier-specific pricing: lowest non-zero price for each tier, 0 if unavailable
+    const signatureRents = members.filter(m => m.isSignature).map(m => m.minRent).filter(r => r > 0);
+    const signaturePrice = signatureRents.length > 0 ? Math.min(...signatureRents) : 0;
+
+    const eliteRents = members.filter(m => m.isElite).map(m => m.minRent).filter(r => r > 0);
+    const elitePrice = eliteRents.length > 0 ? Math.min(...eliteRents) : 0;
+
+    // Available units split by tier
+    const availableSignatureUnits = members
+      .filter(m => m.isSignature)
+      .reduce((sum, m) => sum + m.availableUnits, 0);
+    const availableEliteUnits = members
+      .filter(m => m.isElite)
+      .reduce((sum, m) => sum + m.availableUnits, 0);
+    const totalAvailableUnits = availableSignatureUnits + availableEliteUnits;
+
+    // Availability status: Available if ANY has units
+    const availabilityStatus = totalAvailableUnits > 0 ? 'Available' : 'Sold-out';
+
+    // Price per bed: use the starting price / bedrooms (0 if no valid price)
+    const pricePerBed = startingPrice && bedrooms ? Math.round(startingPrice / bedrooms) : 0;
+
+    // Description: "3 bedroom, 3 bathroom Flat layout from 1236 to 1238 sq ft. Available in Elite and Signature tier."
+    const sqftText = minSqft === maxSqft
+      ? `with ${minSqft} sq ft`
+      : `from ${minSqft} to ${maxSqft} sq ft`;
+    const tierList: string[] = [];
+    if (tierElite) tierList.push('Elite');
+    if (tierSignature) tierList.push('Signature');
+    const tierText = tierList.length > 0
+      ? `Available in ${tierList.join(' and ')} tier.`
+      : '';
+    const description = `${bedrooms} bedroom, ${bathrooms} bathroom ${layoutType} layout ${sqftText}. ${tierText}`;
+
+    results.push({
       fieldData: {
         // Basic info
         'name': layoutType,
         'slug': slug,
 
-        // Custom fields - matching exact Webflow collection order
+        // Custom fields
         'bedrooms': bedrooms,
         'bathrooms': bathrooms,
-        'square-footage': sqft,
-        'starting-price': minRent,
-        'available-units': availableUnits,
+        'square-footage': avgSqft,
+        'starting-price': startingPrice,
+        'available-units': totalAvailableUnits,
+        'available-signature-units': availableSignatureUnits,
+        'available-elite-units': availableEliteUnits,
         'layout-type': layoutType,
-        'description': `${bedrooms} bedroom, ${bathrooms} bathroom ${layoutType} layout with ${sqft} sq ft. ${tierFromName ? `${tierFromName} tier.` : ''}`,
-        'floor-plan-image': '',
-        'floorplan-id': unitTypeId.toString(),
+        'description': description,
+        // Note: 'floor-plan-image' is intentionally omitted to preserve manually-added images
+        'floorplan-id': floorplanIds,
         'availability-status': availabilityStatus,
-        'tier-signature': isSignature,
-        'tier-elite': isElite,
+        'tier-signature': tierSignature,
+        'tier-elite': tierElite,
+        'signature-price': signaturePrice,
+        'elite-price': elitePrice,
         'price-per-bed': pricePerBed,
         'property-id': config.entrataPropertyId,
 
@@ -346,8 +459,10 @@ function transformToWebflowItems(
         '_archived': false,
         '_draft': false,
       },
-    };
-  });
+    });
+  }
+
+  return results;
 }
 
 /**
@@ -413,12 +528,12 @@ async function syncToWebflow(
   console.log('  📥 Fetching existing items from Webflow...');
   const existingItems = await fetchAllWebflowItems(env, config.webflowCollectionId);
 
-  // Create a map of existing items by floorplan-id
+  // Create a map of existing items by slug (the unique identifier for grouped floorplans)
   const existingItemsMap = new Map<string, any>();
   for (const item of existingItems) {
-    const floorplanId = item.fieldData?.['floorplan-id'];
-    if (floorplanId) {
-      existingItemsMap.set(floorplanId, item);
+    const slug = item.fieldData?.['slug'];
+    if (slug) {
+      existingItemsMap.set(slug, item);
     }
   }
 
@@ -429,8 +544,8 @@ async function syncToWebflow(
   let updatedCount = 0;
 
   for (const item of items) {
-    const floorplanId = item.fieldData['floorplan-id'];
-    const existingItem = existingItemsMap.get(floorplanId);
+    const slug = item.fieldData['slug'];
+    const existingItem = existingItemsMap.get(slug);
 
     if (existingItem) {
       // Update existing item
@@ -449,7 +564,7 @@ async function syncToWebflow(
 
       if (!updateResponse.ok) {
         const errorText = await updateResponse.text();
-        console.error(`  ❌ Failed to update item ${floorplanId}:`, errorText);
+        console.error(`  ❌ Failed to update item ${slug}:`, errorText);
       } else {
         updatedCount++;
       }
@@ -470,7 +585,7 @@ async function syncToWebflow(
 
       if (!createResponse.ok) {
         const errorText = await createResponse.text();
-        console.error(`  ❌ Failed to create item ${floorplanId}:`, errorText);
+        console.error(`  ❌ Failed to create item ${slug}:`, errorText);
       } else {
         createdCount++;
       }
@@ -480,12 +595,12 @@ async function syncToWebflow(
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
 
-  // 3. Delete items that no longer exist in Entrata
-  const incomingFloorplanIds = new Set(items.map((item) => item.fieldData['floorplan-id']));
+  // 3. Delete items whose slug no longer exists in the incoming grouped data
+  const incomingSlugs = new Set(items.map((item) => item.fieldData['slug']));
   const itemsToDelete: any[] = [];
 
-  for (const [floorplanId, existingItem] of existingItemsMap) {
-    if (!incomingFloorplanIds.has(floorplanId)) {
+  for (const [slug, existingItem] of existingItemsMap) {
+    if (!incomingSlugs.has(slug)) {
       itemsToDelete.push(existingItem);
     }
   }
@@ -503,7 +618,7 @@ async function syncToWebflow(
 
     if (!deleteResponse.ok) {
       const errorText = await deleteResponse.text();
-      console.error(`  ❌ Failed to delete item ${item.fieldData?.['floorplan-id']}:`, errorText);
+      console.error(`  ❌ Failed to delete item ${item.fieldData?.['slug']}:`, errorText);
     } else {
       deletedCount++;
     }
