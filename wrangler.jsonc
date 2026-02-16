@@ -12,7 +12,8 @@
 
   // Property configurations (add more as needed)
   "vars": {
-"PROPERTIES": "[{\"entrataPropertyId\":\"100084649\",\"webflowSiteId\":\"6992330677a0c781d913d7ce\",\"webflowCollectionId\":\"6992330677a0c781d913d7dc\",\"name\":\"Tenth & Tusk\"}]"
+"PROPERTIES": "[{\"entrataPropertyId\":\"100084649\",\"webflowSiteId\":\"6992330677a0c781d913d7ce\",\"webflowCollectionId\":\"6992330677a0c781d913d7dc\",\"name\":\"Tenth & Tusk\"}]",
+"SYNC_LOG_COLLECTION_ID": "69931bd216a1ac1f56c7ef85"
   }
 
   // Secrets (set via: wrangler secret put SECRET_NAME)

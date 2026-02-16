@@ -13,6 +13,9 @@ export interface Env {
 
   // JSON array of property configurations
   PROPERTIES: string;
+
+  // Sync log CMS collection ID
+  SYNC_LOG_COLLECTION_ID: string;
 }
 
 interface PropertyConfig {
@@ -58,6 +61,16 @@ interface EntrataUnitType {
 
 interface WebflowItem {
   fieldData: Record<string, any>;
+}
+
+interface SyncResult {
+  propertyName: string;
+  status: 'Success' | 'Failed';
+  itemsSynced: number;
+  itemsCreated: number;
+  itemsUpdated: number;
+  itemsDeleted: number;
+  details: string;
 }
 
 interface ParsedFloorplan {
@@ -112,8 +125,12 @@ async function syncAllProperties(env: Env): Promise<void> {
     console.log(`📋 Found ${properties.length} property configuration(s)`);
 
     for (const property of properties) {
-      await syncSingleProperty(env, property);
+      const result = await syncSingleProperty(env, property);
+      await writeSyncLog(env, result);
     }
+
+    // Clean up logs older than 90 days
+    await cleanupOldSyncLogs(env, 90);
 
     console.log('✅ All properties synced successfully');
   } catch (error) {
@@ -125,7 +142,7 @@ async function syncAllProperties(env: Env): Promise<void> {
 async function syncSingleProperty(
   env: Env,
   config: PropertyConfig
-): Promise<void> {
+): Promise<SyncResult> {
   const propertyName = config.name || config.entrataPropertyId;
   console.log(`\n🏢 Syncing property: ${propertyName}`);
 
@@ -141,16 +158,34 @@ async function syncSingleProperty(
 
     // 3. Sync to Webflow CMS
     console.log(`  📤 Syncing to Webflow CMS...`);
-    await syncToWebflow(env, config, webflowItems);
+    const { created, updated, deleted } = await syncToWebflow(env, config, webflowItems);
     console.log(`  ✅ Successfully synced ${webflowItems.length} grouped floorplans to Webflow`);
 
     // 4. Publish Webflow site
     console.log(`  🚀 Publishing Webflow site...`);
     await publishWebflowSite(env, config.webflowSiteId);
     console.log(`  ✅ Webflow site published`);
+
+    return {
+      propertyName,
+      status: 'Success',
+      itemsSynced: webflowItems.length,
+      itemsCreated: created,
+      itemsUpdated: updated,
+      itemsDeleted: deleted,
+      details: `Synced ${webflowItems.length} floorplans: ${created} created, ${updated} updated, ${deleted} deleted.`,
+    };
   } catch (error) {
     console.error(`  ❌ Failed to sync property ${propertyName}:`, error);
-    throw error;
+    return {
+      propertyName,
+      status: 'Failed',
+      itemsSynced: 0,
+      itemsCreated: 0,
+      itemsUpdated: 0,
+      itemsDeleted: 0,
+      details: `Error: ${error instanceof Error ? error.message : String(error)}`,
+    };
   }
 }
 
@@ -518,10 +553,10 @@ async function syncToWebflow(
   env: Env,
   config: PropertyConfig,
   items: WebflowItem[]
-): Promise<void> {
+): Promise<{ created: number; updated: number; deleted: number }> {
   if (items.length === 0) {
     console.log('  ⚠️  No items to sync');
-    return;
+    return { created: 0, updated: 0, deleted: 0 };
   }
 
   // 1. Fetch ALL existing items from Webflow (with pagination)
@@ -628,6 +663,8 @@ async function syncToWebflow(
   }
 
   console.log(`  ✅ Created ${createdCount} new items, updated ${updatedCount} existing items, deleted ${deletedCount} stale items`);
+
+  return { created: createdCount, updated: updatedCount, deleted: deletedCount };
 }
 
 /**
@@ -658,4 +695,111 @@ async function publishWebflowSite(
   }
 
   console.log('  ✅ Published Webflow site');
+}
+
+/**
+ * Write a sync log entry to the Webflow Sync Logs CMS collection
+ */
+async function writeSyncLog(env: Env, result: SyncResult): Promise<void> {
+  if (!env.SYNC_LOG_COLLECTION_ID) {
+    console.log('  ⚠️  No SYNC_LOG_COLLECTION_ID configured, skipping log');
+    return;
+  }
+
+  const now = new Date();
+  const dateStr = now.toISOString().split('T')[0]; // YYYY-MM-DD
+  const slug = `${dateStr}-${result.propertyName.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+
+  try {
+    const endpoint = `https://api.webflow.com/v2/collections/${env.SYNC_LOG_COLLECTION_ID}/items`;
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${env.WEBFLOW_API_TOKEN}`,
+        'Content-Type': 'application/json',
+        'accept': 'application/json',
+      },
+      body: JSON.stringify({
+        fieldData: {
+          'name': `${dateStr} ${result.propertyName}`,
+          'slug': slug,
+          'status': result.status,
+          'items-synced': result.itemsSynced,
+          'items-created': result.itemsCreated,
+          'items-updated': result.itemsUpdated,
+          'items-deleted': result.itemsDeleted,
+          'details': result.details,
+          'property-name': result.propertyName,
+          '_archived': false,
+          '_draft': false,
+        },
+      }),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error(`  ❌ Failed to write sync log: ${response.status} - ${errorText}`);
+    } else {
+      const created = await response.json();
+      console.log(`  📝 Sync log written: ${result.status}`);
+
+      // Publish the log item so it's visible in the CMS
+      if (created.id) {
+        await fetch(
+          `https://api.webflow.com/v2/collections/${env.SYNC_LOG_COLLECTION_ID}/items/publish`,
+          {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${env.WEBFLOW_API_TOKEN}`,
+              'Content-Type': 'application/json',
+              'accept': 'application/json',
+            },
+            body: JSON.stringify({ itemIds: [created.id] }),
+          }
+        );
+      }
+    }
+  } catch (error) {
+    console.error('  ❌ Failed to write sync log:', error);
+  }
+}
+
+/**
+ * Delete sync log entries older than the specified number of days
+ */
+async function cleanupOldSyncLogs(env: Env, maxDays: number): Promise<void> {
+  if (!env.SYNC_LOG_COLLECTION_ID) return;
+
+  try {
+    const allLogs = await fetchAllWebflowItems(env, env.SYNC_LOG_COLLECTION_ID);
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - maxDays);
+
+    let deletedCount = 0;
+    for (const log of allLogs) {
+      const createdOn = new Date(log.createdOn || log.fieldData?.['created-on'] || 0);
+      if (createdOn < cutoff) {
+        const deleteEndpoint = `https://api.webflow.com/v2/collections/${env.SYNC_LOG_COLLECTION_ID}/items/${log.id}`;
+        const response = await fetch(deleteEndpoint, {
+          method: 'DELETE',
+          headers: {
+            'Authorization': `Bearer ${env.WEBFLOW_API_TOKEN}`,
+            'accept': 'application/json',
+          },
+        });
+
+        if (response.ok) {
+          deletedCount++;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
+
+    if (deletedCount > 0) {
+      console.log(`  🗑️  Cleaned up ${deletedCount} sync log(s) older than ${maxDays} days`);
+    }
+  } catch (error) {
+    console.error('  ❌ Failed to cleanup old sync logs:', error);
+  }
 }
