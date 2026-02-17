@@ -601,6 +601,7 @@ async function syncToWebflow(
         const errorText = await updateResponse.text();
         console.error(`  ❌ Failed to update item ${slug}:`, errorText);
       } else {
+        await updateResponse.json(); // consume body to prevent stalled response warning
         updatedCount++;
       }
     } else {
@@ -622,6 +623,7 @@ async function syncToWebflow(
         const errorText = await createResponse.text();
         console.error(`  ❌ Failed to create item ${slug}:`, errorText);
       } else {
+        await createResponse.json(); // consume body to prevent stalled response warning
         createdCount++;
       }
     }
@@ -655,6 +657,7 @@ async function syncToWebflow(
       const errorText = await deleteResponse.text();
       console.error(`  ❌ Failed to delete item ${item.fieldData?.['slug']}:`, errorText);
     } else {
+      await deleteResponse.text(); // consume body to prevent stalled response warning
       deletedCount++;
     }
 
@@ -694,6 +697,7 @@ async function publishWebflowSite(
     throw new Error(`Webflow publish failed: ${response.status} - ${errorText}`);
   }
 
+  await response.json(); // consume body to prevent stalled response warning
   console.log('  ✅ Published Webflow site');
 }
 
@@ -745,7 +749,7 @@ async function writeSyncLog(env: Env, result: SyncResult): Promise<void> {
 
       // Publish the log item so it's visible in the CMS
       if (created.id) {
-        await fetch(
+        const publishRes = await fetch(
           `https://api.webflow.com/v2/collections/${env.SYNC_LOG_COLLECTION_ID}/items/publish`,
           {
             method: 'POST',
@@ -757,6 +761,7 @@ async function writeSyncLog(env: Env, result: SyncResult): Promise<void> {
             body: JSON.stringify({ itemIds: [created.id] }),
           }
         );
+        await publishRes.text(); // consume body to prevent stalled response warning
       }
     }
   } catch (error) {
@@ -789,7 +794,10 @@ async function cleanupOldSyncLogs(env: Env, maxDays: number): Promise<void> {
         });
 
         if (response.ok) {
+          await response.text(); // consume body to prevent stalled response warning
           deletedCount++;
+        } else {
+          await response.text(); // consume error body
         }
 
         await new Promise((resolve) => setTimeout(resolve, 100));
