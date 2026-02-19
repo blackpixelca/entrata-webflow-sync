@@ -677,8 +677,28 @@ async function publishWebflowSite(
   env: Env,
   siteId: string
 ): Promise<void> {
-  const publishEndpoint = `https://api.webflow.com/v2/sites/${siteId}/publish`;
+  // Fetch custom domain IDs from the site
+  const domainsEndpoint = `https://api.webflow.com/v2/sites/${siteId}/custom_domains`;
+  const domainsResponse = await fetch(domainsEndpoint, {
+    method: 'GET',
+    headers: {
+      'Authorization': `Bearer ${env.WEBFLOW_API_TOKEN}`,
+      'accept': 'application/json',
+    },
+  });
 
+  let customDomainIds: string[] = [];
+  if (domainsResponse.ok) {
+    const domainsData = await domainsResponse.json() as any;
+    const domains = domainsData.customDomains || [];
+    customDomainIds = domains.map((d: any) => d.id);
+    console.log(`  📡 Found ${customDomainIds.length} custom domains to publish`);
+  } else {
+    const errorText = await domainsResponse.text();
+    console.error(`  ⚠️  Failed to fetch domains: ${domainsResponse.status} - ${errorText}`);
+  }
+
+  const publishEndpoint = `https://api.webflow.com/v2/sites/${siteId}/publish`;
   const response = await fetch(publishEndpoint, {
     method: 'POST',
     headers: {
@@ -688,7 +708,7 @@ async function publishWebflowSite(
     },
     body: JSON.stringify({
       publishToWebflowSubdomain: true,
-      publishToCustomDomains: true,
+      customDomains: customDomainIds,
     }),
   });
 
@@ -697,8 +717,8 @@ async function publishWebflowSite(
     throw new Error(`Webflow publish failed: ${response.status} - ${errorText}`);
   }
 
-  await response.json(); // consume body to prevent stalled response warning
-  console.log('  ✅ Published Webflow site');
+  const publishResult = await response.json(); // consume body to prevent stalled response warning
+  console.log('  ✅ Published Webflow site:', JSON.stringify(publishResult));
 }
 
 /**
