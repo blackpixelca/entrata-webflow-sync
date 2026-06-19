@@ -1,7 +1,7 @@
 /**
  * Entrata → Webflow CMS Sync Worker
  * Syncs FLOORPLAN data from Entrata API to Webflow CMS collections
- * Uses getUnitTypes method to fetch floorplan data
+ * Uses getFloorPlans MarketRent for advertised website rates
  */
 
 export interface Env {
@@ -10,6 +10,7 @@ export interface Env {
   ENTRATA_BASE_URL: string;
   ENTRATA_ORG: string;
   WEBFLOW_API_TOKEN: string;
+  DEBUG_TOKEN?: string;
 
   // JSON array of property configurations
   PROPERTIES: string;
@@ -29,34 +30,63 @@ interface EntrataUnitType {
   // Common fields - adjust based on actual API response
   UnitTypeId?: string;
   unitTypeId?: string;
+  identificationType?: {
+    idValue?: string;
+  };
   Name?: string;
   name?: string;
   UnitTypeName?: string;
   unitTypeName?: string;
+  lookUpCode?: string;
   Bedrooms?: number;
   bedrooms?: number;
+  unitBedRooms?: string;
   Beds?: number;
   beds?: number;
   Bathrooms?: number;
   bathrooms?: number;
+  unitBathrooms?: string;
   Baths?: number;
   baths?: number;
   SquareFeet?: number;
   squareFeet?: number;
+  minSquareFeet?: string;
+  maxSquareFeet?: string;
   SQFT?: number;
   sqft?: number;
   MinRent?: number;
   minRent?: number;
   MaxRent?: number;
   maxRent?: number;
+  minMarketRent?: string;
+  maxMarketRent?: string;
+  rent?: {
+    termRent?: any[];
+  };
   AvailableUnits?: number;
   availableUnits?: number;
   TotalUnits?: number;
   totalUnits?: number;
+  unitCount?: string;
   ImageUrl?: string;
   imageUrl?: string;
   Description?: string;
   description?: string;
+}
+
+interface EntrataAdvertisedFloorPlan {
+  floorplanId?: string;
+  name: string;
+  unitTypeIds: string[];
+  unitTypeNames: string[];
+  bedrooms: number;
+  bathrooms: number;
+  unitCount: number;
+  unitsAvailable: number;
+  minSquareFeet: number;
+  maxSquareFeet: number;
+  marketRentMin: number;
+  marketRentMax: number;
 }
 
 interface WebflowItem {
@@ -103,6 +133,14 @@ export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
+    if (url.pathname === '/debug/rate-source') {
+      if (request.method === 'GET') {
+        return handleRateSourceDebug(request, env);
+      }
+
+      return new Response('Not found', { status: 404 });
+    }
+
     if (url.pathname === '/sync' && request.method === 'POST') {
       try {
         await syncAllProperties(env);
@@ -118,6 +156,413 @@ export default {
     });
   },
 };
+
+type DebugSourceName = 'getUnitTypes' | 'getFloorPlans' | 'getMitsPropertyUnits';
+
+interface DebugRateRecord {
+  source: DebugSourceName;
+  id?: string;
+  name: string;
+  floorplanId?: string;
+  unitTypeId?: string;
+  unitTypeIds?: string[];
+  unitTypeNames?: string[];
+  bedrooms: number;
+  bathrooms: number;
+  unitCount?: number;
+  unitsAvailable?: number;
+  minMarketRent?: number;
+  maxMarketRent?: number;
+  marketRentMin?: number;
+  marketRentMax?: number;
+  termRents?: Array<{
+    leaseTerm?: string;
+    leaseTermName?: string;
+    rent: number;
+    isSoldOut?: boolean;
+  }>;
+  matchScore?: number;
+}
+
+interface EntrataDebugCallResult {
+  source: DebugSourceName;
+  endpointPath: string;
+  ok: boolean;
+  status?: number;
+  error?: string;
+  records: DebugRateRecord[];
+}
+
+async function handleRateSourceDebug(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const providedToken = url.searchParams.get('token') || '';
+
+  if (!env.DEBUG_TOKEN || !providedToken || providedToken !== env.DEBUG_TOKEN) {
+    return new Response('Not found', { status: 404 });
+  }
+
+  const query = url.searchParams.get('q') || '4x4 Corner Elite';
+  let properties: PropertyConfig[];
+
+  try {
+    properties = JSON.parse(env.PROPERTIES);
+  } catch {
+    return jsonResponse({ error: 'Invalid PROPERTIES configuration' }, 500);
+  }
+
+  const property = properties[0];
+
+  if (!property) {
+    return jsonResponse({ error: 'No property configured' }, 500);
+  }
+
+  const [currentSource, primaryCandidate, fallbackCandidate] = await Promise.all([
+    debugFetchUnitTypes(env, property.entrataPropertyId),
+    debugFetchFloorPlans(env, property.entrataPropertyId),
+    debugFetchMitsPropertyUnits(env, property.entrataPropertyId),
+  ]);
+
+  const sources = [currentSource, primaryCandidate, fallbackCandidate].map((source) => ({
+    source: source.source,
+    endpointPath: source.endpointPath,
+    ok: source.ok,
+    status: source.status,
+    error: source.error,
+    totalRecords: source.records.length,
+    matches: bestRateMatches(source.records, query),
+  }));
+
+  const getFloorPlansMatch = sources
+    .find((source) => source.source === 'getFloorPlans')
+    ?.matches.find((record) => (record.marketRentMin || 0) > 0);
+  const getMitsMatch = sources
+    .find((source) => source.source === 'getMitsPropertyUnits')
+    ?.matches.find((record) => (record.marketRentMin || 0) > 0);
+
+  return jsonResponse({
+    mode: 'read-only',
+    query,
+    property: {
+      name: property.name,
+      entrataPropertyId: property.entrataPropertyId,
+      webflowSiteId: property.webflowSiteId,
+      webflowCollectionId: property.webflowCollectionId,
+    },
+    recommendedSource: getFloorPlansMatch
+      ? 'getFloorPlans'
+      : getMitsMatch
+        ? 'getMitsPropertyUnits'
+        : null,
+    sources,
+    notes: [
+      'This route only reads Entrata data.',
+      'It does not call syncAllProperties, syncToWebflow, writeSyncLog, or publishWebflowSite.',
+    ],
+  });
+}
+
+async function debugFetchUnitTypes(
+  env: Env,
+  propertyId: string
+): Promise<EntrataDebugCallResult> {
+  const endpointPath = '/v1/propertyunits';
+  const result = await entrataDebugRequest(env, endpointPath, 'getUnitTypes', { propertyId });
+
+  if (!result.ok) {
+    return { ...result, source: 'getUnitTypes', endpointPath, records: [] };
+  }
+
+  const records = toArray(result.data?.response?.result?.unitTypes?.unitType).map((unitType: any) => {
+    const termRents = toArray(unitType.rent?.termRent)
+      .map((termRent: any) => {
+        const attrs = termRent?.['@attributes'] || {};
+        return {
+          leaseTerm: attrs.leaseTerm,
+          leaseTermName: attrs.leaseTermName,
+          rent: parseMoney(attrs.rent),
+          isSoldOut: parseBoolean(attrs.isSoldOut),
+        };
+      })
+      .filter((rent) => rent.rent > 0);
+
+    const floorplanName = unitType.floorplan?.['@value'] || '';
+    const name = unitType.name || unitType.lookUpCode || floorplanName || 'Unknown';
+    const parsed = parseBedBath(unitType.unitBedRooms, unitType.unitBathrooms, name || floorplanName);
+
+    return {
+      source: 'getUnitTypes' as DebugSourceName,
+      id: stringifyId(unitType.identificationType?.idValue),
+      name,
+      floorplanId: stringifyId(unitType.floorplan?.['@attributes']?.Id),
+      unitTypeId: stringifyId(unitType.identificationType?.idValue),
+      bedrooms: parsed.bedrooms,
+      bathrooms: parsed.bathrooms,
+      unitCount: parseInteger(unitType.unitCount),
+      minMarketRent: parseMoney(unitType.minMarketRent),
+      maxMarketRent: parseMoney(unitType.maxMarketRent),
+      termRents,
+    };
+  });
+
+  return { source: 'getUnitTypes', endpointPath, ok: true, status: result.status, records };
+}
+
+async function debugFetchFloorPlans(
+  env: Env,
+  propertyId: string
+): Promise<EntrataDebugCallResult> {
+  const endpointPath = '/v1/properties';
+  const result = await entrataDebugRequest(env, endpointPath, 'getFloorPlans', {
+    propertyId,
+    usePropertyPreferences: 1,
+    includeDisabledFloorplans: 0,
+  });
+
+  if (!result.ok) {
+    return { ...result, source: 'getFloorPlans', endpointPath, records: [] };
+  }
+
+  const records = toArray(result.data?.response?.result?.FloorPlans?.FloorPlan).map((floorplan: any) => {
+    const name = floorplan.Name || 'Unknown';
+    const parsed = parseBedBathFromRooms(floorplan.Room, name);
+    const unitTypes = toArray(floorplan.UnitTypes?.UnitType);
+    const unitTypeNames = unitTypes
+      .map((unitType: any) => stringifyId(unitType?.['@value']))
+      .filter(Boolean);
+
+    return {
+      source: 'getFloorPlans' as DebugSourceName,
+      id: stringifyId(floorplan.Identification?.IDValue),
+      name,
+      floorplanId: stringifyId(floorplan.Identification?.IDValue),
+      unitTypeIds: unitTypes
+        .map((unitType: any) => stringifyId(unitType?.['@attributes']?.Id))
+        .filter(Boolean),
+      unitTypeNames,
+      bedrooms: parsed.bedrooms,
+      bathrooms: parsed.bathrooms,
+      unitCount: parseInteger(floorplan.UnitCount),
+      unitsAvailable: parseInteger(floorplan.UnitsAvailable),
+      marketRentMin: parseMoney(floorplan.MarketRent?.['@attributes']?.Min),
+      marketRentMax: parseMoney(floorplan.MarketRent?.['@attributes']?.Max),
+    };
+  });
+
+  return { source: 'getFloorPlans', endpointPath, ok: true, status: result.status, records };
+}
+
+async function debugFetchMitsPropertyUnits(
+  env: Env,
+  propertyId: string
+): Promise<EntrataDebugCallResult> {
+  const endpointPath = '/v1/propertyunits';
+  const result = await entrataDebugRequest(env, endpointPath, 'getMitsPropertyUnits', {
+    propertyIds: propertyId,
+    usePropertyPreferences: 1,
+    availableUnitsOnly: 0,
+    includeDisabledFloorplans: 0,
+    showUnitSpaces: 1,
+  });
+
+  if (!result.ok) {
+    return { ...result, source: 'getMitsPropertyUnits', endpointPath, records: [] };
+  }
+
+  const properties = toArray(result.data?.response?.result?.PhysicalProperty?.Property);
+  const floorplans = properties.flatMap((propertyNode: any) => [
+    ...toArray(propertyNode.Floorplan),
+    ...toArray(propertyNode.Floorplans?.Floorplan),
+  ]);
+
+  const records = floorplans.map((floorplan: any) => {
+    const name = floorplan.Name || floorplan.FloorplanName || 'Unknown';
+    const parsed = parseBedBathFromRooms(floorplan.Room, name);
+
+    return {
+      source: 'getMitsPropertyUnits' as DebugSourceName,
+      id: stringifyId(floorplan.Identification?.IDValue || floorplan.FloorPlanId),
+      name,
+      floorplanId: stringifyId(floorplan.Identification?.IDValue || floorplan.FloorPlanId),
+      bedrooms: parsed.bedrooms,
+      bathrooms: parsed.bathrooms,
+      unitCount: parseInteger(floorplan.UnitCount),
+      unitsAvailable: parseInteger(floorplan.UnitsAvailable),
+      marketRentMin: parseMoney(floorplan.MarketRent?.['@attributes']?.Min),
+      marketRentMax: parseMoney(floorplan.MarketRent?.['@attributes']?.Max),
+    };
+  });
+
+  return { source: 'getMitsPropertyUnits', endpointPath, ok: true, status: result.status, records };
+}
+
+async function entrataDebugRequest(
+  env: Env,
+  endpointPath: string,
+  methodName: string,
+  params: Record<string, unknown>
+): Promise<{ ok: boolean; status: number; data?: any; error?: string }> {
+  try {
+    const endpoint = `${env.ENTRATA_BASE_URL}/${env.ENTRATA_ORG}${endpointPath}`;
+    const response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'X-Api-Key': env.ENTRATA_API_KEY,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        auth: { type: 'apikey' },
+        requestId: `debug-${methodName}`,
+        method: {
+          name: methodName,
+          version: 'r1',
+          params,
+        },
+      }),
+    });
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      return {
+        ok: false,
+        status: response.status,
+        error: responseText.substring(0, 500),
+      };
+    }
+
+    return {
+      ok: true,
+      status: response.status,
+      data: responseText ? JSON.parse(responseText) : {},
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+function bestRateMatches(records: DebugRateRecord[], query: string): DebugRateRecord[] {
+  return records
+    .map((record) => ({
+      ...record,
+      matchScore: scoreRateMatch(record, query),
+    }))
+    .filter((record) => (record.matchScore || 0) > 0)
+    .sort((a, b) => (b.matchScore || 0) - (a.matchScore || 0))
+    .slice(0, 10);
+}
+
+function scoreRateMatch(record: DebugRateRecord, query: string): number {
+  const normalizedQuery = normalizeText(query);
+  const text = normalizeText([
+    record.name,
+    record.id,
+    record.floorplanId,
+    record.unitTypeId,
+    ...(record.unitTypeIds || []),
+    ...(record.unitTypeNames || []),
+  ].filter(Boolean).join(' '));
+  const desired = parseBedBath(undefined, undefined, query);
+  const layout = ['corner', 'flat', 'townhouse', 'studio', 'penthouse', 'loft']
+    .find((value) => normalizedQuery.includes(value));
+  const tier = ['elite', 'signature', 'standard']
+    .find((value) => normalizedQuery.includes(value));
+  let score = 0;
+
+  if (normalizedQuery && text.includes(normalizedQuery)) score += 50;
+  if (desired.bedrooms > 0 && record.bedrooms === desired.bedrooms) score += 20;
+  if (desired.bathrooms > 0 && record.bathrooms === desired.bathrooms) score += 20;
+  if (layout && text.includes(layout)) score += 20;
+  if (tier && text.includes(tier)) score += 20;
+
+  for (const token of normalizedQuery.split(' ')) {
+    if (token.length > 2 && text.includes(token)) score += 5;
+  }
+
+  return score;
+}
+
+function parseBedBathFromRooms(rooms: unknown, fallbackText: string): { bedrooms: number; bathrooms: number } {
+  let bedrooms = 0;
+  let bathrooms = 0;
+
+  for (const room of toArray(rooms)) {
+    const roomType = String(room?.['@attributes']?.RoomType || '').toLowerCase();
+    const count = parseInteger(room?.Count);
+    if (roomType.includes('bedroom')) bedrooms = count;
+    if (roomType.includes('bathroom')) bathrooms = count;
+  }
+
+  return parseBedBath(bedrooms || undefined, bathrooms || undefined, fallbackText);
+}
+
+function parseBedBath(
+  bedroomsValue: unknown,
+  bathroomsValue: unknown,
+  fallbackText: string
+): { bedrooms: number; bathrooms: number } {
+  let bedrooms = parseInteger(bedroomsValue);
+  let bathrooms = parseInteger(bathroomsValue);
+  const lowerText = fallbackText.toLowerCase();
+  const xMatch = lowerText.match(/(\d+)\s*x\s*(\d+)/);
+
+  if (xMatch) {
+    bedrooms = bedrooms || parseInteger(xMatch[1]);
+    bathrooms = bathrooms || parseInteger(xMatch[2]);
+  }
+
+  const bedMatch = lowerText.match(/(\d+)\s*(?:br|bed|bedroom)/);
+  const bathMatch = lowerText.match(/(\d+)\s*(?:ba|bath|bathroom)/);
+
+  if (bedMatch) bedrooms = bedrooms || parseInteger(bedMatch[1]);
+  if (bathMatch) bathrooms = bathrooms || parseInteger(bathMatch[1]);
+
+  return { bedrooms, bathrooms };
+}
+
+function normalizeText(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+function toArray(value: any): any[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function parseMoney(value: unknown): number {
+  if (value === undefined || value === null) return 0;
+  const parsed = parseFloat(String(value).replace(/[$,]/g, ''));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseInteger(value: unknown): number {
+  if (value === undefined || value === null) return 0;
+  const parsed = parseInt(String(value).replace(/,/g, ''), 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseBoolean(value: unknown): boolean | undefined {
+  if (value === true || value === 'true' || value === 1 || value === '1') return true;
+  if (value === false || value === 'false' || value === 0 || value === '0') return false;
+  return undefined;
+}
+
+function stringifyId(value: unknown): string | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  return String(value);
+}
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body, null, 2), {
+    status,
+    headers: {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+    },
+  });
+}
 
 async function syncAllProperties(env: Env): Promise<void> {
   try {
@@ -147,10 +592,10 @@ async function syncSingleProperty(
   console.log(`\n🏢 Syncing property: ${propertyName}`);
 
   try {
-    // 1. Fetch unit types (floorplans) from Entrata
-    console.log(`  📥 Fetching unit types from Entrata...`);
+    // 1. Fetch floorplans from Entrata
+    console.log(`  📥 Fetching floorplans from Entrata...`);
     const unitTypes = await fetchEntrataUnitTypes(env, config.entrataPropertyId);
-    console.log(`  ✓ Retrieved ${unitTypes.length} unit types from Entrata`);
+    console.log(`  ✓ Retrieved ${unitTypes.length} floorplans from Entrata`);
 
     // 2. Transform to Webflow format
     console.log(`  🔄 Transforming data...`);
@@ -190,9 +635,60 @@ async function syncSingleProperty(
 }
 
 /**
- * Fetch unit types (floorplans) from Entrata API using getUnitTypes method
+ * Fetch unit type data and replace lease/pricing rents with advertised floorplan MarketRent.
+ * getUnitTypes still provides stable square footage, availability, and unit type IDs.
  */
 async function fetchEntrataUnitTypes(
+  env: Env,
+  propertyId: string
+): Promise<EntrataUnitType[]> {
+  const [unitTypes, advertisedFloorPlans] = await Promise.all([
+    fetchEntrataLeaseUnitTypes(env, propertyId),
+    fetchEntrataAdvertisedFloorPlans(env, propertyId),
+  ]);
+
+  if (advertisedFloorPlans.length === 0) {
+    console.log('  ⚠️  No advertised getFloorPlans rates found; falling back to getUnitTypes rents');
+    return unitTypes;
+  }
+
+  const matchedAdvertisedRates = new Set<EntrataAdvertisedFloorPlan>();
+  let appliedAdvertisedRates = 0;
+
+  const mergedUnitTypes = unitTypes.map((unitType) => {
+    const rate = findAdvertisedRateForUnitType(unitType, advertisedFloorPlans);
+
+    if (!rate || rate.marketRentMin <= 0) {
+      return unitType;
+    }
+
+    matchedAdvertisedRates.add(rate);
+    appliedAdvertisedRates++;
+
+    return {
+      ...unitType,
+      minMarketRent: formatEntrataRent(rate.marketRentMin),
+      maxMarketRent: formatEntrataRent(rate.marketRentMax || rate.marketRentMin),
+    };
+  });
+
+  const unmatchedAdvertisedFloorPlans = advertisedFloorPlans
+    .filter((rate) => !matchedAdvertisedRates.has(rate) && rate.marketRentMin > 0)
+    .map(advertisedFloorPlanToUnitType);
+
+  console.log(
+    `  ✓ Applied ${appliedAdvertisedRates} advertised getFloorPlans rates; ` +
+    `added ${unmatchedAdvertisedFloorPlans.length} getFloorPlans-only floorplans`
+  );
+
+  return [...mergedUnitTypes, ...unmatchedAdvertisedFloorPlans];
+}
+
+/**
+ * Fetch unit types from Entrata API using getUnitTypes.
+ * This source is retained for non-rate metadata and as a rate fallback only.
+ */
+async function fetchEntrataLeaseUnitTypes(
   env: Env,
   propertyId: string
 ): Promise<EntrataUnitType[]> {
@@ -211,6 +707,7 @@ async function fetchEntrataUnitTypes(
       requestId: '1',
       method: {
         name: 'getUnitTypes',
+        version: 'r1',
         params: {
           propertyId: propertyId
         }
@@ -225,7 +722,7 @@ async function fetchEntrataUnitTypes(
     );
   }
 
-  const data = await response.json();
+  const data = await response.json() as any;
 
   // Log the full response to understand structure
   console.log('  🔍 Entrata API Response:', JSON.stringify(data, null, 2));
@@ -284,6 +781,157 @@ async function fetchEntrataUnitTypes(
   }
 
   return unitTypes;
+}
+
+/**
+ * Fetch advertised floorplan rates from Entrata Property > Floorplans & Units.
+ */
+async function fetchEntrataAdvertisedFloorPlans(
+  env: Env,
+  propertyId: string
+): Promise<EntrataAdvertisedFloorPlan[]> {
+  const endpoint = `${env.ENTRATA_BASE_URL}/${env.ENTRATA_ORG}/v1/properties`;
+
+  const response = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'X-Api-Key': env.ENTRATA_API_KEY,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      auth: {
+        type: 'apikey'
+      },
+      requestId: 'advertised-floorplans',
+      method: {
+        name: 'getFloorPlans',
+        version: 'r1',
+        params: {
+          propertyId,
+          usePropertyPreferences: 1,
+          includeDisabledFloorplans: 0,
+        }
+      }
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(
+      `Entrata getFloorPlans failed: ${response.status} ${response.statusText} - ${errorText}`
+    );
+  }
+
+  const data = await response.json() as any;
+  const floorPlans = toArray(data.response?.result?.FloorPlans?.FloorPlan);
+
+  if (floorPlans.length === 0) {
+    console.log('  ⚠️  getFloorPlans returned no FloorPlans.FloorPlan records');
+    return [];
+  }
+
+  const advertisedFloorPlans = floorPlans.map((floorPlan: any): EntrataAdvertisedFloorPlan => {
+    const name = floorPlan.Name || 'Unknown';
+    const unitTypes = toArray(floorPlan.UnitTypes?.UnitType);
+    const squareFeet = extractFloorPlanSquareFeet(floorPlan);
+    const parsed = parseBedBathFromRooms(floorPlan.Room, name);
+
+    return {
+      floorplanId: stringifyId(floorPlan.Identification?.IDValue),
+      name,
+      unitTypeIds: unitTypes
+        .map((unitType: any) => stringifyId(unitType?.['@attributes']?.Id))
+        .filter(Boolean),
+      unitTypeNames: unitTypes
+        .map((unitType: any) => stringifyId(unitType?.['@value']))
+        .filter(Boolean),
+      bedrooms: parsed.bedrooms,
+      bathrooms: parsed.bathrooms,
+      unitCount: parseInteger(floorPlan.UnitCount),
+      unitsAvailable: parseInteger(floorPlan.UnitsAvailable),
+      minSquareFeet: squareFeet.min,
+      maxSquareFeet: squareFeet.max,
+      marketRentMin: parseMoney(floorPlan.MarketRent?.['@attributes']?.Min),
+      marketRentMax: parseMoney(floorPlan.MarketRent?.['@attributes']?.Max),
+    };
+  });
+
+  console.log(`  ✓ Retrieved ${advertisedFloorPlans.length} advertised floorplan rates from getFloorPlans`);
+
+  return advertisedFloorPlans;
+}
+
+function findAdvertisedRateForUnitType(
+  unitType: EntrataUnitType,
+  advertisedFloorPlans: EntrataAdvertisedFloorPlan[]
+): EntrataAdvertisedFloorPlan | undefined {
+  const unitTypeId = stringifyId(unitType.identificationType?.idValue);
+
+  if (unitTypeId) {
+    const byUnitTypeId = advertisedFloorPlans.find((rate) => rate.unitTypeIds.includes(unitTypeId));
+    if (byUnitTypeId) return byUnitTypeId;
+  }
+
+  const unitTypeName = unitType.name || unitType.lookUpCode || unitType.UnitTypeName || unitType.Name || '';
+  const normalizedUnitTypeName = normalizeText(unitTypeName);
+
+  if (!normalizedUnitTypeName) {
+    return undefined;
+  }
+
+  return advertisedFloorPlans.find((rate) => {
+    if (normalizeText(rate.name) === normalizedUnitTypeName) return true;
+    return rate.unitTypeNames.some((name) => normalizeText(name) === normalizedUnitTypeName);
+  });
+}
+
+function advertisedFloorPlanToUnitType(rate: EntrataAdvertisedFloorPlan): EntrataUnitType {
+  const unitTypeId = rate.unitTypeIds[0] || rate.floorplanId || '';
+  const squareFeet = rate.minSquareFeet || rate.maxSquareFeet || 0;
+
+  return {
+    identificationType: {
+      idValue: unitTypeId,
+    },
+    name: rate.name,
+    lookUpCode: rate.name,
+    unitBedRooms: String(rate.bedrooms || 0),
+    unitBathrooms: String(rate.bathrooms || 0),
+    minSquareFeet: String(rate.minSquareFeet || squareFeet),
+    maxSquareFeet: String(rate.maxSquareFeet || squareFeet),
+    minMarketRent: formatEntrataRent(rate.marketRentMin),
+    maxMarketRent: formatEntrataRent(rate.marketRentMax || rate.marketRentMin),
+    unitCount: String(rate.unitsAvailable || rate.unitCount || 0),
+  };
+}
+
+function extractFloorPlanSquareFeet(floorPlan: any): { min: number; max: number } {
+  const squareFeet = floorPlan.SquareFeet;
+  const attrs = squareFeet?.['@attributes'] || {};
+  const directValue = parseInteger(squareFeet);
+
+  const min = parseInteger(
+    attrs.Min ||
+    attrs.min ||
+    attrs.MinSquareFeet ||
+    floorPlan.MinSquareFeet ||
+    floorPlan.minSquareFeet ||
+    directValue
+  );
+  const max = parseInteger(
+    attrs.Max ||
+    attrs.max ||
+    attrs.MaxSquareFeet ||
+    floorPlan.MaxSquareFeet ||
+    floorPlan.maxSquareFeet ||
+    min
+  );
+
+  return { min, max };
+}
+
+function formatEntrataRent(value: number): string {
+  return String(Math.round(value));
 }
 
 /**
@@ -528,7 +1176,7 @@ async function fetchAllWebflowItems(
       );
     }
 
-    const data = await response.json();
+    const data = await response.json() as any;
     const items = data.items || [];
     allItems.push(...items);
 
@@ -764,7 +1412,7 @@ async function writeSyncLog(env: Env, result: SyncResult): Promise<void> {
       const errorText = await response.text();
       console.error(`  ❌ Failed to write sync log: ${response.status} - ${errorText}`);
     } else {
-      const created = await response.json();
+      const created = await response.json() as any;
       console.log(`  📝 Sync log written: ${result.status}`);
 
       // Publish the log item so it's visible in the CMS

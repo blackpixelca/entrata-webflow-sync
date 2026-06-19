@@ -19,5 +19,7 @@
   // Secrets (set via: wrangler secret put SECRET_NAME)
   // - ENTRATA_API_KEY
   // - ENTRATA_BASE_URL
+  // - ENTRATA_ORG
+  // - DEBUG_TOKEN
   // - WEBFLOW_API_TOKEN
 }
